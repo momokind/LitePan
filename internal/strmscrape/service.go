@@ -538,7 +538,7 @@ func (s *Service) resolveTask(ctx context.Context, id int64) (*domain.StrmTask, 
 	if task == nil {
 		return nil, "", domain.Errorf(domain.CodeNotFound, "STRM 任务不存在")
 	}
-	root := strm.TaskOutputDir(s.strmDir, task.OutputFolder)
+	root := strm.TaskOutputDir(strm.EffectiveStrmDir(s.settings, s.strmDir), task.OutputFolder)
 	if root == "" {
 		return nil, "", domain.Errorf(domain.CodeValidation, "输出目录无效")
 	}

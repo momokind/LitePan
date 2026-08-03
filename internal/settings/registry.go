@@ -44,6 +44,7 @@ const (
 	KeyStrmMetadataParentEnabled   = "strm_metadata_parent_enabled"
 	KeyStrmMetadataSyncMode        = "strm_metadata_sync_mode"
 	KeyStrmScrapeWriteMode         = "strm_scrape_write_mode"
+	KeyStrmDir                     = "strm_dir"
 
 	KeyMOProxyEnabled          = "mo_proxy_enabled"
 	KeyMOProxyURL              = "mo_proxy_url"
@@ -59,6 +60,7 @@ const (
 	KeyMOAlignMediaTags        = "mo_align_media_tags"
 	KeyMOMaxWorksPerRun        = "mo_max_works_per_run"
 	KeyMOOverwriteExisting     = "mo_overwrite_existing"
+	KeyMOKeepOriginalFilename  = "mo_keep_original_filename"
 )
 
 // Type 决定后台表单控件与校验方式。
@@ -462,6 +464,14 @@ func defaultSpecs() []Spec {
 			Default:     "missing_only",
 		},
 		{
+			Key:         KeyStrmDir,
+			Type:        TypeString,
+			Category:    "strm",
+			Label:       "STRM 输出目录",
+			Description: "STRM 文件写入的本地根目录。留空时使用启动参数或 LITEPAN_STRM_DIR 配置的默认目录。",
+			Default:     "",
+		},
+		{
 			Key:         KeyMOProxyEnabled,
 			Type:        TypeBool,
 			Category:    "media_organize",
@@ -582,6 +592,14 @@ func defaultSpecs() []Spec {
 			Label:       "同名冲突时覆盖",
 			Description: "目标位置已有同名文件时覆盖，默认跳过。",
 			Default:     "false",
+		},
+		{
+			Key:         KeyMOKeepOriginalFilename,
+			Type:        TypeBool,
+			Category:    "media_organize",
+			Label:       "保留原始文件名",
+			Description: "开启后，仅重命名整理后的目录，视频文件沿用原始文件名；同一作品的多视频文件移入同一目录保持原名共存。",
+			Default:     "true",
 		},
 	}
 }

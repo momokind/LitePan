@@ -33,6 +33,7 @@ type StrmSettingsForm = Pick<
   StrmSettings,
   | "base_url"
   | "signature_enabled"
+  | "strm_dir"
   | "default_scan_interval"
   | "default_extensions"
   | "iso_filename_enabled"
@@ -67,6 +68,7 @@ const {
   {
     base_url: "",
     signature_enabled: false,
+    strm_dir: "",
     default_scan_interval: DEFAULT_SCAN_INTERVAL_MINUTES,
     default_extensions: "",
     iso_filename_enabled: false,
@@ -111,6 +113,7 @@ function applySettings(data: Awaited<ReturnType<typeof fetchStrmSettings>>) {
   applyBaseline({
     base_url: data.base_url ?? "",
     signature_enabled: !!data.signature_enabled,
+    strm_dir: data.strm_dir ?? "",
     default_scan_interval: parseSettingNumber(data.default_scan_interval) || DEFAULT_SCAN_INTERVAL_MINUTES,
     default_extensions: data.default_extensions ?? "",
     iso_filename_enabled: !!data.iso_filename_enabled,
@@ -145,7 +148,7 @@ async function saveSettings() {
   }
   saving.value = true;
   try {
-    const data = await saveStrmSettings({
+    const payload: Parameters<typeof saveStrmSettings>[0] = {
       base_url: settings.base_url,
       signature_enabled: settings.signature_enabled,
       default_scan_interval: settings.default_scan_interval,
@@ -158,7 +161,11 @@ async function saveSettings() {
       metadata_max_size_mb: settings.metadata_max_size_mb,
       metadata_parent_enabled: settings.metadata_parent_enabled,
       metadata_sync_mode: settings.metadata_sync_mode,
-    });
+    };
+    if (isSettingChanged("strm_dir")) {
+      payload.strm_dir = settings.strm_dir;
+    }
+    const data = await saveStrmSettings(payload);
     applySettings(data);
     toast.success("STRM 设置已保存");
   } catch (e) {
@@ -262,6 +269,21 @@ defineExpose(
           </template>
           <template #control>
             <SettingsBoolSegment v-model="settings.signature_enabled" label="URL 签名" />
+          </template>
+        </SettingsRow>
+
+        <SettingsRow :show-changed-badge="true" :changed="isSettingChanged('strm_dir')">
+          <template #info>
+            <div class="settings-row__label">
+              <span>STRM 输出目录</span>
+              <SettingsHelpTooltip title="STRM 输出目录说明">
+                <p>STRM 文件写入的本地根目录。留空时使用启动参数或 LITEPAN_STRM_DIR 配置的默认目录。</p>
+                <p>修改后，后续任务生成的 .strm 文件会写入新目录；已有的任务按任务内保存的输出文件夹名继续写入该根目录下。</p>
+              </SettingsHelpTooltip>
+            </div>
+          </template>
+          <template #control>
+            <AppInput v-model="settings.strm_dir" placeholder="默认：数据目录同级 strm" />
           </template>
         </SettingsRow>
 

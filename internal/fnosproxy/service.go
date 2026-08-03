@@ -128,7 +128,7 @@ func New(opts Options) *Service {
 
 func (s *Service) Snapshot(r *http.Request) Config {
 	cfg := s.configFromSettings()
-	cfg.StrmDir = s.strmDir
+	cfg.StrmDir = strm.EffectiveStrmDir(s.settings, s.strmDir)
 	if cfg.Port != "" {
 		cfg.ProxyURL = publicBase(r, cfg.Port)
 	}
@@ -1070,7 +1070,7 @@ func (s *Service) readStrmURL(rawPath string, cfg Config) string {
 }
 
 func (s *Service) resolvePathMaps(raw string) [][2]string {
-	strmDir := strings.TrimRight(strings.TrimSpace(s.strmDir), "/")
+	strmDir := strings.TrimRight(strings.TrimSpace(strm.EffectiveStrmDir(s.settings, s.strmDir)), "/")
 	if strmDir == "" {
 		strmDir = "/app/strm"
 	}

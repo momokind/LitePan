@@ -26,6 +26,7 @@ var moSettingFieldToKey = map[string]string{
 	"align_media_tags":         settings.KeyMOAlignMediaTags,
 	"max_works_per_run":        settings.KeyMOMaxWorksPerRun,
 	"overwrite_existing":       settings.KeyMOOverwriteExisting,
+	"keep_original_filename":   settings.KeyMOKeepOriginalFilename,
 }
 
 var validMediaTagKeys = map[string]struct{}{
@@ -40,7 +41,7 @@ func SettingsDict(svc *settings.Service) map[string]any {
 	out := make(map[string]any, len(moSettingFieldToKey))
 	for field, key := range moSettingFieldToKey {
 		switch field {
-		case "proxy_enabled", "align_media_tags", "overwrite_existing":
+		case "proxy_enabled", "align_media_tags", "overwrite_existing", "keep_original_filename":
 			out[field] = svc.Bool(key)
 		case "api_request_interval_ms", "tmdb_request_interval_ms", "max_works_per_run":
 			out[field] = svc.Int(key)
@@ -138,7 +139,7 @@ func parseMediaTagOrder(raw any) (json.RawMessage, error) {
 
 func anyToSettingString(field string, raw any) (string, error) {
 	switch field {
-	case "proxy_enabled", "align_media_tags", "overwrite_existing":
+	case "proxy_enabled", "align_media_tags", "overwrite_existing", "keep_original_filename":
 		b, ok := raw.(bool)
 		if !ok {
 			return "", fmt.Errorf("%s 需为布尔值", field)

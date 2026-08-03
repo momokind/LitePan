@@ -285,12 +285,15 @@ func (s *Service) RotateStrmKey(ctx context.Context, applyToExisting bool) (Rota
 	if err := s.settings.Update(ctx, map[string]string{settings.KeyStrmToken: newToken}); err != nil {
 		return out, err
 	}
-	if applyToExisting && s.strmDir != "" {
-		rep, err := strm.ReplaceTokenInFiles(s.strmDir, oldToken, newToken, s.secret)
-		if err != nil {
-			return out, err
+	if applyToExisting {
+		strmDir := strm.EffectiveStrmDir(s.settings, s.strmDir)
+		if strmDir != "" {
+			rep, err := strm.ReplaceTokenInFiles(strmDir, oldToken, newToken, s.secret)
+			if err != nil {
+				return out, err
+			}
+			out.ReplaceResult = &rep
 		}
-		out.ReplaceResult = &rep
 	}
 	strmKey, err := s.buildStrmKeyView(newToken)
 	if err != nil {

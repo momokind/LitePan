@@ -107,7 +107,7 @@ func TestPlanDoesNotFetchTVSeasonsWhenTMDBIsDisabledOrUnavailable(t *testing.T) 
 					UseTMDB:           tt.useTMDB,
 					Recursive:         true,
 				},
-				planner.Settings{"mo_tmdb_api_key": "test-key"},
+				planner.Settings{"mo_tmdb_api_key": "test-key", "mo_keep_original_filename": false},
 				"task-test",
 				tmdb,
 				func(string) {},
@@ -152,7 +152,8 @@ func newTestPlanner(fs *mockFS, tmdb planner.TMDBClient, rootID string) *planner
 			Recursive:         true,
 		},
 		planner.Settings{
-			"mo_tmdb_api_key": "test-key",
+			"mo_tmdb_api_key":           "test-key",
+			"mo_keep_original_filename": false,
 		},
 		"task-test",
 		tmdb,
@@ -1468,7 +1469,7 @@ func TestPlanEpisodeRangeDirectories(t *testing.T) {
 			RenameMarker:      "off",
 			Recursive:         true,
 		},
-		nil,
+		planner.Settings{"mo_keep_original_filename": false},
 		"task-test",
 		nil,
 		func(string) {},
@@ -1809,5 +1810,196 @@ func TestDirSeasonFallbackFromDirName(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected relocate action for f1, actions=%+v", plan.Actions)
+	}
+}
+
+func TestMovePlanKeepOriginalFilenameDefault(t *testing.T) {
+	fs := &mockFS{dirs: map[string][]domain.FileItem{
+		"root": {{
+			ID:   "f1",
+			Name: "Spirited.Away.2001.REMUX.mkv",
+		}},
+	}}
+	p := planner.New(
+		context.Background(),
+		fs,
+		1,
+		planner.TaskConfig{
+			TargetDirectoryID: "root",
+			ActionType:        "move",
+			MediaType:         "auto",
+			RenameMarker:      "off",
+			UseTMDB:           true,
+			Recursive:         true,
+		},
+		planner.Settings{"mo_tmdb_api_key": "test-key"},
+		"task-test",
+		&mockTMDB{
+			searchFn: func(query string, year *int) []map[string]any {
+				if strings.Contains(query, "千与千寻") || strings.Contains(query, "Spirited") {
+					return []map[string]any{{
+						"id":             129,
+						"title":          "千与千寻",
+						"original_title": "Spirited Away",
+						"release_date":   "2001-07-20",
+					}}
+				}
+				return nil
+			},
+		},
+		func(string) {},
+		nil,
+		func() error { return nil },
+	)
+	plan, err := p.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasWorkDir := false
+	var fileAction *moplan.PlanAction
+	for i := range plan.Actions {
+		a := &plan.Actions[i]
+		if a.Kind == moplan.ActionKindEnsureDir && a.TargetName == "千与千寻 (2001) {tmdb-129}" {
+			hasWorkDir = true
+		}
+		if a.SourceID == "f1" {
+			fileAction = a
+		}
+	}
+	if !hasWorkDir {
+		t.Fatalf("want work dir named by tmdb match, actions=%+v", plan.Actions)
+	}
+	if fileAction == nil {
+		t.Fatalf("want file move action, actions=%+v", plan.Actions)
+	}
+	if fileAction.TargetName != "Spirited.Away.2001.REMUX.mkv" {
+		t.Fatalf("keep original filename default: target=%q", fileAction.TargetName)
+	}
+}
+
+func TestMovePlanKeepOriginalMultiVideoFilesSameDir(t *testing.T) {
+	fs := &mockFS{dirs: map[string][]domain.FileItem{
+		"root": {
+			{ID: "f1", Name: "Movie.Part1.2001.REMUX.mkv"},
+			{ID: "f2", Name: "Movie.Part2.2001.REMUX.mkv"},
+		},
+	}}
+	p := planner.New(
+		context.Background(),
+		fs,
+		1,
+		planner.TaskConfig{
+			TargetDirectoryID: "root",
+			ActionType:        "move",
+			MediaType:         "auto",
+			RenameMarker:      "off",
+			UseTMDB:           true,
+			Recursive:         true,
+		},
+		planner.Settings{"mo_tmdb_api_key": "test-key"},
+		"task-test",
+		&mockTMDB{
+			searchFn: func(query string, year *int) []map[string]any {
+				if strings.Contains(query, "Movie") {
+					return []map[string]any{{
+						"id":             129,
+						"title":          "电影名",
+						"original_title": "Movie",
+						"release_date":   "2001-07-20",
+					}}
+				}
+				return nil
+			},
+		},
+		func(string) {},
+		nil,
+		func() error { return nil },
+	)
+	plan, err := p.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := map[string]string{}
+	for _, a := range plan.Actions {
+		if a.Kind == moplan.ActionKindRelocate {
+			targets[a.SourceID] = a.TargetParentID
+		}
+	}
+	if targets["f1"] == "" || targets["f2"] == "" {
+		t.Fatalf("want file moves for both videos, got %+v", targets)
+	}
+	if targets["f1"] != targets["f2"] {
+		t.Fatalf("multi video files should share one target dir: f1=%q f2=%q", targets["f1"], targets["f2"])
+	}
+	for _, a := range plan.Actions {
+		if a.Kind != moplan.ActionKindRelocate {
+			continue
+		}
+		if a.SourceID == "f1" && a.TargetName != "Movie.Part1.2001.REMUX.mkv" {
+			t.Fatalf("f1 should keep original name, got %q", a.TargetName)
+		}
+		if a.SourceID == "f2" && a.TargetName != "Movie.Part2.2001.REMUX.mkv" {
+			t.Fatalf("f2 should keep original name, got %q", a.TargetName)
+		}
+	}
+}
+
+func TestMovePlanKeepOriginalFilenameDisabledRenamesFile(t *testing.T) {
+	fs := &mockFS{dirs: map[string][]domain.FileItem{
+		"root": {{
+			ID:   "f1",
+			Name: "Spirited.Away.2001.REMUX.mkv",
+		}},
+	}}
+	p := planner.New(
+		context.Background(),
+		fs,
+		1,
+		planner.TaskConfig{
+			TargetDirectoryID: "root",
+			ActionType:        "move",
+			MediaType:         "auto",
+			RenameMarker:      "off",
+			UseTMDB:           true,
+			Recursive:         true,
+		},
+		planner.Settings{
+			"mo_tmdb_api_key":           "test-key",
+			"mo_keep_original_filename": false,
+		},
+		"task-test",
+		&mockTMDB{
+			searchFn: func(query string, year *int) []map[string]any {
+				if strings.Contains(query, "千与千寻") || strings.Contains(query, "Spirited") {
+					return []map[string]any{{
+						"id":             129,
+						"title":          "千与千寻",
+						"original_title": "Spirited Away",
+						"release_date":   "2001-07-20",
+					}}
+				}
+				return nil
+			},
+		},
+		func(string) {},
+		nil,
+		func() error { return nil },
+	)
+	plan, err := p.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fileAction *moplan.PlanAction
+	for i := range plan.Actions {
+		if plan.Actions[i].SourceID == "f1" {
+			fileAction = &plan.Actions[i]
+			break
+		}
+	}
+	if fileAction == nil {
+		t.Fatalf("want file move action, actions=%+v", plan.Actions)
+	}
+	if strings.HasPrefix(fileAction.TargetName, "Spirited.Away") {
+		t.Fatalf("keep original disabled should rename file, target=%q", fileAction.TargetName)
 	}
 }

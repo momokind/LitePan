@@ -275,7 +275,7 @@ func TestApplyMetadataFollowersOnRenameMerge(t *testing.T) {
 			TargetName:     "千与千寻 (2001) [1080p H.264 PCM 2.0].mkv",
 			Metadata: map[string]any{
 				"_resolved_target_parent_id": "d1",
-				"mode":                     "rename",
+				"mode":                       "rename",
 			},
 		}},
 		Diagnostics: map[string]any{
@@ -568,5 +568,116 @@ func TestSafeMoveVerifyAfterFalseError(t *testing.T) {
 	}
 	if len(fs.dirs["trg"]) != 1 {
 		t.Fatalf("file should be in trg after verify, trg=%v root=%v", fs.dirs["trg"], fs.dirs["root"])
+	}
+}
+
+func TestApplyKeepOriginalFilenameMoveOnlyAndMetadataRenamed(t *testing.T) {
+	base := "白日梦想家.The Secret Life of Walter Mitty.2013.1080p.BluRay.REMUX.DTS-HD.MA.7.1.AVC"
+	fs := &mockExecFS{dirs: map[string][]domain.FileItem{
+		"root": {
+			{ID: "trg", Name: "整理目标", IsDir: true},
+			{ID: "src", Name: "白日梦想家 蓝光原盘REMUX 内封简英字幕", IsDir: true},
+		},
+		"src": {
+			{ID: "mkv1", Name: base + ".mkv"},
+			{ID: "poster", Name: base + "-poster.jpg"},
+			{ID: "nfo", Name: base + ".nfo"},
+		},
+		"trg": {},
+	}}
+	tmdb := &plannerMockTMDB{
+		searchFn: func(query string, _ *int) []map[string]any {
+			if strings.Contains(query, "白日梦想家") {
+				return []map[string]any{
+					{"id": 116745, "title": "白日梦想家", "original_title": "The Secret Life of Walter Mitty", "release_date": "2013-12-25"},
+				}
+			}
+			return nil
+		},
+	}
+	p := planner.New(
+		context.Background(),
+		fs,
+		1,
+		planner.TaskConfig{
+			TargetDirectoryID:  "root",
+			TargetRootID:       "trg",
+			ActionType:         "move",
+			MediaType:          "auto",
+			UseTMDB:            true,
+			Recursive:          true,
+			MetadataExtensions: "nfo;jpg;png",
+		},
+		planner.Settings{"mo_tmdb_api_key": "test-key", "mo_keep_original_filename": "true"},
+		"task-test",
+		tmdb,
+		func(string) {},
+		nil,
+		func() error { return nil },
+	)
+	plan, err := p.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err = moplan.Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var videoAction *moplan.PlanAction
+	for i := range plan.Actions {
+		a := &plan.Actions[i]
+		if a.Kind == moplan.ActionKindRelocate && a.SourceID == "mkv1" {
+			videoAction = a
+		}
+	}
+	if videoAction == nil {
+		t.Fatal("expected video relocate action, got none")
+	}
+	if videoAction.TargetName != base+".mkv" {
+		t.Fatalf("video target name should keep original = %q, got %q", base+".mkv", videoAction.TargetName)
+	}
+	ex := executor.New(context.Background(), fs, plan, 1, false, func(msg string) { t.Log(msg) }, nil)
+	if _, err := ex.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	underTarget := false
+	for _, item := range fs.dirs["trg"] {
+		if item.ID == "src" {
+			underTarget = true
+			if !strings.Contains(item.Name, "白日梦想家") {
+				t.Fatalf("work dir name = %q", item.Name)
+			}
+		}
+	}
+	if !underTarget {
+		t.Fatalf("work dir should be moved under trg, trg=%v", fs.dirs["trg"])
+	}
+	videoKeptName := false
+	for _, item := range fs.dirs["src"] {
+		if item.ID == "mkv1" {
+			videoKeptName = true
+			if item.Name != base+".mkv" {
+				t.Fatalf("video name should be kept original, got %q", item.Name)
+			}
+		}
+	}
+	if !videoKeptName {
+		t.Fatalf("video should exist in moved work dir, src=%v", fs.dirs["src"])
+	}
+	for _, name := range []string{"-poster.jpg", ".nfo"} {
+		found := false
+		for _, item := range fs.dirs["src"] {
+			if strings.Contains(item.Name, "白日梦想家") && strings.Contains(item.Name, name) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("metadata %q should be renamed to matched name under src, items=%v", name, fs.dirs["src"])
+		}
 	}
 }

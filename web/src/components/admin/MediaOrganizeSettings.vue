@@ -95,6 +95,7 @@ const {
   align_media_tags: false,
   max_works_per_run: 50,
   overwrite_existing: false,
+  keep_original_filename: true,
 });
 const tagOrder = reactive<string[]>([...ALL_TAG_KEYS]);
 
@@ -478,6 +479,22 @@ defineExpose(
           </template>
           <template #control>
             <AppSelect v-model="conflictPolicy" :options="conflictPolicyOptions" />
+          </template>
+        </SettingsRow>
+
+        <SettingsRow :show-changed-badge="true" :changed="isFieldChanged('keep_original_filename')">
+          <template #info>
+            <div class="settings-row__label">
+              <span>保留原始文件名</span>
+              <SettingsHelpTooltip title="保留原始文件名说明">
+                <p>开启后，整理时只把作品目录重命名为匹配结果，视频文件沿用原始文件名。</p>
+                <p>若一个电影/剧集有多个视频文件，会移入同一目录、保持原名共存。</p>
+                <p>关闭后恢复旧行为：目录和视频文件都按匹配结果重命名。</p>
+              </SettingsHelpTooltip>
+            </div>
+          </template>
+          <template #control>
+            <SettingsBoolSegment v-model="settings.keep_original_filename" label="保留原始文件名" />
           </template>
         </SettingsRow>
       </SettingsCard>

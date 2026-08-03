@@ -293,6 +293,11 @@ func (p *Planner) planGroup(key groupKey, items []batchEntry, alignDefaults map[
 		newFilename = rules.FitFilenameBytes(newFilename, p.tmdbLang)
 		newMetaBase := stripExt(newFilename, ext)
 
+		targetFilename := newFilename
+		if p.keepOriginalFilename {
+			targetFilename = entry.item.Name
+		}
+
 		isRename := p.actionType == "rename"
 		targetParent := entry.sourceDirID
 		var deps []string
@@ -318,7 +323,7 @@ func (p *Planner) planGroup(key groupKey, items []batchEntry, alignDefaults map[
 			} else if key.mediaKind == "movie" && promotedMovieParent != "" {
 				targetParent = chooseStr(key.dirID, entry.sourceDirID)
 			}
-			if rules.IsSameGeneratedName(entry.item.Name, newFilename) && targetParent == entry.sourceDirID {
+			if rules.IsSameGeneratedName(entry.item.Name, targetFilename) && targetParent == entry.sourceDirID {
 				p.skip(entry.item, "已是目标名")
 				continue
 			}
@@ -333,7 +338,7 @@ func (p *Planner) planGroup(key groupKey, items []batchEntry, alignDefaults map[
 			SourceName:     entry.item.Name,
 			SourceParentID: entry.sourceDirID,
 			TargetParentID: targetParent,
-			TargetName:     newFilename,
+			TargetName:     targetFilename,
 			Reason:         p.buildReason(key, tmdbID, displayTitle, currentSeason, currentEpisode, isRename),
 			Confidence:     tmdbInfo.confidenceOr(0.6, tmdbID),
 			DependsOn:      deps,
@@ -384,7 +389,7 @@ func (p *Planner) isAlreadyOrganizedRenameGroup(key groupKey, items []batchEntry
 		}
 	}
 	for _, entry := range items {
-		if !rules.IsAlreadyOrganized(entry.item.Name, p.marker) {
+		if !p.keepOriginalFilename && !rules.IsAlreadyOrganized(entry.item.Name, p.marker) {
 			return false
 		}
 		if p.seasonDirNeedsStandardization(entry) || p.renameEntryNeedsPlacement(key, entry) {
@@ -509,6 +514,9 @@ func (p *Planner) buildReason(key groupKey, tmdbID, displayTitle string, season,
 		bits = append(bits, "原地重命名")
 	} else {
 		bits = append(bits, "移动并重命名")
+	}
+	if p.keepOriginalFilename {
+		bits = append(bits, "保留原始文件名")
 	}
 	return strings.Join(bits, " | ")
 }

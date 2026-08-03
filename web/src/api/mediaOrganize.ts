@@ -94,6 +94,7 @@ export interface MediaOrganizeSettings {
   align_media_tags: boolean;
   max_works_per_run: number;
   overwrite_existing: boolean;
+  keep_original_filename: boolean;
 }
 
 export type MediaOrganizeTaskInput = {

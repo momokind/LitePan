@@ -64,6 +64,7 @@ func EnrichPlannerSettings(svc *settings.Service, api map[string]any) map[string
 	out["mo_align_media_tags"] = svc.Bool(settings.KeyMOAlignMediaTags)
 	out["mo_max_works_per_run"] = svc.Int(settings.KeyMOMaxWorksPerRun)
 	out["mo_overwrite_existing"] = svc.Bool(settings.KeyMOOverwriteExisting)
+	out["mo_keep_original_filename"] = svc.Bool(settings.KeyMOKeepOriginalFilename)
 	return out
 }
 

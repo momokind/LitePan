@@ -40,23 +40,24 @@ type Planner struct {
 	plannedWorkCount  int
 	quotaReached      bool
 
-	mediaExts         map[string]struct{}
-	metaExts          map[string]struct{}
-	mediaTagOrder     []string
-	alignMediaTags    bool
-	actionType        string
-	marker            string
-	taskMediaType     string
-	recursive         bool
-	parentID          string
-	targetRootID      string
-	useTMDB           bool
-	overwriteExisting bool
-	tmdbLang          string
-	tmdbInterval      time.Duration
-	tmdbAvailable     bool
-	seasonFolderTpl   string
-	tvSeasonsCache    map[string][]map[string]any
+	mediaExts            map[string]struct{}
+	metaExts             map[string]struct{}
+	mediaTagOrder        []string
+	alignMediaTags       bool
+	actionType           string
+	marker               string
+	taskMediaType        string
+	recursive            bool
+	parentID             string
+	targetRootID         string
+	useTMDB              bool
+	overwriteExisting    bool
+	keepOriginalFilename bool
+	tmdbLang             string
+	tmdbInterval         time.Duration
+	tmdbAvailable        bool
+	seasonFolderTpl      string
+	tvSeasonsCache       map[string][]map[string]any
 }
 
 func New(
@@ -145,6 +146,7 @@ func (p *Planner) loadSettings() {
 	}
 	p.useTMDB = p.cfg.UseTMDB
 	p.overwriteExisting = p.cfg.OverwriteExisting || rules.SettingBool(p.settings["mo_overwrite_existing"], false)
+	p.keepOriginalFilename = rules.SettingBool(p.settings["mo_keep_original_filename"], true)
 	p.tmdbLang = strSetting(p.settings, "mo_tmdb_language", "zh-CN")
 	if ms, ok := p.settings["mo_tmdb_request_interval_ms"]; ok {
 		if n, err := strconv.Atoi(fmt.Sprint(ms)); err == nil && n > 0 {

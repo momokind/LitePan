@@ -66,6 +66,7 @@ export interface StrmSettings {
   token: string;
   base_url: string;
   signature_enabled: boolean;
+  strm_dir: string;
   default_scan_interval: number;
   default_extensions: string;
   iso_filename_enabled: boolean;
@@ -257,6 +258,7 @@ export function saveStrmSettings(body: Partial<Record<keyof StrmSettings, string
     ["token", (v) => String(v)],
     ["base_url", (v) => String(v)],
     ["signature_enabled", (v) => (v ? "true" : "false")],
+    ["strm_dir", (v) => String(v)],
     ["default_scan_interval", (v) => String(v)],
     ["default_extensions", (v) => String(v)],
     ["iso_filename_enabled", (v) => (v ? "true" : "false")],

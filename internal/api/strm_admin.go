@@ -556,6 +556,7 @@ func mapStrmSettingAliases(in map[string]string) {
 		"token":                   settings.KeyStrmToken,
 		"base_url":                settings.KeyStrmBaseURL,
 		"signature_enabled":       settings.KeyStrmSignatureEnabled,
+		"strm_dir":                settings.KeyStrmDir,
 		"default_scan_interval":   settings.KeyStrmDefaultScanInterval,
 		"default_extensions":      settings.KeyStrmDefaultExtensions,
 		"iso_filename_enabled":    settings.KeyStrmISOFilenameEnabled,
@@ -568,6 +569,9 @@ func mapStrmSettingAliases(in map[string]string) {
 		"metadata_sync_mode":      settings.KeyStrmMetadataSyncMode,
 	}
 	for k, v := range aliases {
+		if k == v {
+			continue
+		}
 		if raw, ok := in[k]; ok {
 			in[v] = raw
 			delete(in, k)

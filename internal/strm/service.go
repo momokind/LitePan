@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -101,12 +102,27 @@ func NewService(opts ServiceOptions) *Service {
 }
 
 func (s *Service) SetOrganizeBusyChecker(checker RunningAccountLister) {
-	if s == nil {
-		return
-	}
 	s.mu.Lock()
 	s.organizeBusy = checker
 	s.mu.Unlock()
+}
+
+// effectiveStrmDir 返回实际使用的 STRM 输出根目录：
+// 优先取全局设置 strm_dir（允许运行时修改），未配置时回落启动时确定的目录。
+func (s *Service) effectiveStrmDir() string {
+	return EffectiveStrmDir(s.settings, s.strmDir)
+}
+
+// EffectiveStrmDir 返回实际使用的 STRM 输出根目录：
+// 优先取全局设置 strm_dir（允许运行时修改），未配置时回落 fallback。
+// 供 STRM 服务及其余读写 STRM 文件的模块统一解析。
+func EffectiveStrmDir(settingsSvc *settings.Service, fallback string) string {
+	if settingsSvc != nil {
+		if v := strings.TrimSpace(settingsSvc.String(settings.KeyStrmDir)); v != "" {
+			return v
+		}
+	}
+	return fallback
 }
 
 func (s *Service) SetRetentionBusyChecker(checker RunningAccountLister) {
@@ -325,7 +341,7 @@ func (s *Service) DeleteTask(ctx context.Context, id int64, deleteStrmFiles bool
 		outputFolder = task.Name
 	}
 	if deleteStrmFiles {
-		if err := DeleteTaskOutput(s.strmDir, outputFolder); err != nil {
+		if err := DeleteTaskOutput(s.effectiveStrmDir(), outputFolder); err != nil {
 			return err
 		}
 	}
@@ -426,6 +442,7 @@ func (s *Service) GetRuntimeSettings(ctx context.Context, requestBase string) (m
 		"token":                   token,
 		"base_url":                effective,
 		"signature_enabled":       s.settings.Bool(settings.KeyStrmSignatureEnabled),
+		"strm_dir":                s.effectiveStrmDir(),
 		"default_scan_interval":   s.settings.Int(settings.KeyStrmDefaultScanInterval),
 		"default_extensions":      s.settings.String(settings.KeyStrmDefaultExtensions),
 		"iso_filename_enabled":    s.settings.Bool(settings.KeyStrmISOFilenameEnabled),
@@ -440,6 +457,14 @@ func (s *Service) GetRuntimeSettings(ctx context.Context, requestBase string) (m
 }
 
 func (s *Service) UpdateRuntimeSettings(ctx context.Context, in map[string]string) error {
+	if v, ok := in[settings.KeyStrmDir]; ok {
+		dir := strings.TrimSpace(v)
+		if dir != "" {
+			if err := ensureStrmDirWritable(dir); err != nil {
+				return err
+			}
+		}
+	}
 	return s.settings.Update(ctx, in)
 }
 
@@ -448,7 +473,7 @@ func (s *Service) ReplaceBaseURL(ctx context.Context, newBaseURL string) (Replac
 	if err := ValidateBaseURL(base); err != nil {
 		return ReplaceBaseURLResult{}, domain.Errorf(domain.CodeValidation, "%s", err.Error())
 	}
-	result, err := ReplaceBaseURLInFiles(s.strmDir, base)
+	result, err := ReplaceBaseURLInFiles(s.effectiveStrmDir(), base)
 	if err != nil {
 		return result, err
 	}
@@ -462,7 +487,7 @@ func (s *Service) PrecheckAccountRepair(ctx context.Context, in AccountRepairPre
 	if s == nil {
 		return AccountRepairPrecheckResult{}, domain.Errorf(domain.CodeInternal, "strm service unavailable")
 	}
-	return PrecheckAccountRepair(ctx, s.files, s.strmDir, in)
+	return PrecheckAccountRepair(ctx, s.files, s.effectiveStrmDir(), in)
 }
 
 func (s *Service) RepairAccountReferences(ctx context.Context, in AccountRepairInput) (AccountRepairResult, error) {
@@ -473,7 +498,7 @@ func (s *Service) RepairAccountReferences(ctx context.Context, in AccountRepairI
 	if err != nil {
 		return AccountRepairResult{}, err
 	}
-	return RepairAccountReferences(ctx, s.files, s.strmDir, s.scanBaseURL(), token, s.SignatureEnabled(), s.secret, in)
+	return RepairAccountReferences(ctx, s.files, s.effectiveStrmDir(), s.scanBaseURL(), token, s.SignatureEnabled(), s.secret, in)
 }
 
 func (s *Service) MatchToken(ctx context.Context, token string) (bool, error) {
@@ -578,6 +603,17 @@ func (s *Service) configuredBaseURL() string {
 		return ""
 	}
 	return NormalizeBaseURL(s.settings.String(settings.KeyStrmBaseURL))
+}
+
+// ensureStrmDirWritable 校验目标 STRM 目录可创建/可写，失败时返回校验错误。
+func ensureStrmDirWritable(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return domain.Errorf(domain.CodeValidation, "STRM 输出目录不可用：%v", err)
+	}
+	return nil
 }
 
 func (s *Service) scanBaseURL() string {
