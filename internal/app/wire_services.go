@@ -10,6 +10,7 @@ import (
 	"litepan/internal/crosstransfer"
 	"litepan/internal/domain"
 	"litepan/internal/embyproxy"
+	"litepan/internal/eventmonitor"
 	"litepan/internal/favorites"
 	"litepan/internal/file"
 	"litepan/internal/fnosproxy"
@@ -42,6 +43,7 @@ type servicesBundle struct {
 	embyProxy        *embyproxy.Service
 	fnosProxy        *fnosproxy.Service
 	favorites        *favorites.Service
+	eventMonitor     *eventmonitor.Service
 }
 
 func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *coreBundle) *servicesBundle {
@@ -51,6 +53,7 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	playbackSvc := playback.NewService(core.exec, core.cache)
 	strmSvc, coord := wireSTRM(st, fileSvc, playbackSvc, core.bus, logs, cfg.DataDir, cfg.StrmDir, cfg.ListenAddr, core.secret)
 	core.strm = coord
+	eventMonitorSvc := wireEventMonitor(st, strmSvc, core, logs)
 	retentionSvc, retentionCoord := wireCacheRetention(st, fileSvc, core.cache, core.bus, logs)
 	mediaOrganizeSvc := wireMediaOrganize(st, fileSvc, logs, cfg.DataDir)
 	strmScrapeSvc := strmscrape.New(strmscrape.Options{
@@ -89,13 +92,14 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	})
 	_ = fuseSvc.PrepareMountRoot()
 	lifecycle := &accountLifecycle{
-		fuse:      fuseSvc,
-		readCache: fuseReadCache,
-		strm:      coord,
-		retention: retentionCoord,
-		media:     mediaOrganizeSvc,
-		favorites: favoritesSvc,
-		offline:   offlineDownloadSvc,
+		fuse:         fuseSvc,
+		readCache:    fuseReadCache,
+		strm:         coord,
+		retention:    retentionCoord,
+		media:        mediaOrganizeSvc,
+		favorites:    favoritesSvc,
+		offline:      offlineDownloadSvc,
+		eventMonitor: eventMonitorSvc,
 	}
 	accountSvc := account.NewService(account.Options{
 		Accounts:      st.store.Accounts,
@@ -171,5 +175,6 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		embyProxy:        embyProxySvc,
 		fnosProxy:        fnosProxySvc,
 		favorites:        favoritesSvc,
+		eventMonitor:     eventMonitorSvc,
 	}
 }

@@ -6,6 +6,7 @@ import (
 
 	"litepan/internal/cacheretention"
 	"litepan/internal/domain"
+	"litepan/internal/eventmonitor"
 	"litepan/internal/favorites"
 	"litepan/internal/fusemount"
 	"litepan/internal/fusereadcache"
@@ -16,14 +17,15 @@ import (
 )
 
 type accountLifecycle struct {
-	fuse      *fusemount.Service
-	readCache *fusereadcache.Service
-	strm      *strm.Coordinator
-	retention *cacheretention.Coordinator
-	media     *mediaorganize.Service
-	favorites *favorites.Service
-	offline   *offlinedownload.Service
-	uploads   *upload.Manager
+	fuse         *fusemount.Service
+	readCache    *fusereadcache.Service
+	strm         *strm.Coordinator
+	retention    *cacheretention.Coordinator
+	media        *mediaorganize.Service
+	favorites    *favorites.Service
+	offline      *offlinedownload.Service
+	uploads      *upload.Manager
+	eventMonitor *eventmonitor.Service
 }
 
 func (a accountLifecycle) OnAccountDisabled(ctx context.Context, accountID int64) {
@@ -93,6 +95,9 @@ func (a accountLifecycle) OnAccountDeleted(ctx context.Context, accountID int64)
 		if _, err := a.uploads.RemoveTasksByAccount(ctx, accountID); err != nil {
 			return fmt.Errorf("清理上传任务失败: %w", err)
 		}
+	}
+	if a.eventMonitor != nil {
+		a.eventMonitor.CleanupAccount(ctx, accountID)
 	}
 	return nil
 }

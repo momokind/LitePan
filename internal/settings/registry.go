@@ -48,6 +48,9 @@ const (
 	KeyStrmMetadataParentEnabled   = "strm_metadata_parent_enabled"
 	KeyStrmMetadataSyncMode        = "strm_metadata_sync_mode"
 	KeyStrmScrapeWriteMode         = "strm_scrape_write_mode"
+	KeyStrmEventMonitorEnabled     = "strm_event_monitor_enabled"
+	KeyStrmEventMonitorIntervalSec = "strm_event_monitor_interval_sec"
+	KeyStrmEventTriggerCooldownMin = "strm_event_trigger_cooldown_min"
 
 	KeyMOProxyEnabled          = "mo_proxy_enabled"
 	KeyMOProxyURL              = "mo_proxy_url"
@@ -177,6 +180,9 @@ func defaultSpecs() []Spec {
 			{Value: "bidirectional", Label: "本地与云端互补"},
 		}),
 		stringSpec(KeyStrmScrapeWriteMode, "strm", "STRM 刮削写入策略", "missing_only=仅补缺；overwrite=覆盖已有 nfo/海报。", "missing_only"),
+		boolSpec(KeyStrmEventMonitorEnabled, "strm", "启用 115 事件监控", "轮询 115 操作事件，云端文件增删改后自动触发 STRM 增量重扫（需 115 驱动 Cookie 账号）。该事件接口有风控，轮询过密会被 115 临时拦截，默认 60 秒轮询一次。", "false"),
+		intSpec(KeyStrmEventMonitorIntervalSec, "strm", "事件轮询间隔", "每账号轮询 115 操作事件的间隔，受风控约束不建议低于 60 秒。", "60", "秒", 30, 600),
+		intSpec(KeyStrmEventTriggerCooldownMin, "strm", "事件触发冷却", "同一账号两次事件触发 STRM 重扫的最小间隔，防止频繁扫描触发风控。", "2", "分钟", 1, 60),
 		boolSpec(KeyMOProxyEnabled, "media_organize", "启用代理", "TMDB 请求经代理出站。", "false"),
 		stringSpec(KeyMOProxyURL, "media_organize", "代理地址", "HTTP/HTTPS 代理地址，例如 http://127.0.0.1:7890。", ""),
 		stringSpec(KeyMOProxyUsername, "media_organize", "代理用户名", "代理认证用户名，无认证可留空。", ""),

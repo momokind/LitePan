@@ -17,6 +17,7 @@ import (
 	"litepan/internal/driver"
 	"litepan/internal/embyproxy"
 	"litepan/internal/eventbus"
+	"litepan/internal/eventmonitor"
 	"litepan/internal/file"
 	"litepan/internal/fnosproxy"
 	"litepan/internal/fusemount"
@@ -48,6 +49,7 @@ type App struct {
 	offlineDownloads *offlinedownload.Service
 	playback         *playback.Service
 	strm             *strm.Service
+	eventMonitor     *eventmonitor.Service
 	mediaOrganize    *mediaorganize.Service
 	automation       *automation.Service
 	fuse             *fusemount.Service
@@ -118,6 +120,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		offlineDownloads: svc.offlineDownloads,
 		playback:         svc.playback,
 		strm:             svc.strm,
+		eventMonitor:     svc.eventMonitor,
 		mediaOrganize:    svc.mediaOrganize,
 		automation:       svc.automation,
 		fuse:             svc.fuse,
@@ -139,6 +142,9 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.strm != nil {
 		a.strm.Start(ctx)
+	}
+	if a.eventMonitor != nil {
+		a.eventMonitor.Start(ctx)
 	}
 	if a.cacheRetention != nil {
 		a.cacheRetention.Start(ctx)

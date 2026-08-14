@@ -118,6 +118,12 @@ type ConnectionErrorExplainer interface {
 	ExplainConnectionError(technical string, saving bool) string
 }
 
+// OperationEventProvider 可选能力：提供自 fromID 之后的最近操作事件，用于事件监控增量触发。
+// 返回事件切片与新的游标（最新的事件 id）；fromID 为空表示只拉取最近事件并返回游标（供基线初始化）。
+type OperationEventProvider interface {
+	RecentOperations(ctx context.Context, fromID string, limit int) ([]domain.OperationEvent, string, error)
+}
+
 // RequestIntervalConsumer 可选：账号级 API 请求间隔。
 type RequestIntervalConsumer interface {
 	SetRequestIntervalGate(gate RequestIntervalGate)
