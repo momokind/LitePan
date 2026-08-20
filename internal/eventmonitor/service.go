@@ -327,9 +327,11 @@ func (s *Service) resolvePaths(ctx context.Context, accountID int64, parentIDs [
 }
 
 // matchTaskScope 判断事件目录路径是否命中任务扫描作用域。
+// 事件解析出的路径（buildDirPath）不带前导斜杠，而任务 Path 带前导斜杠，
+// 统一用 strings.Trim 去掉首尾斜杠后再比较，避免因斜杠差异导致永不命中。
 func matchTaskScope(path string, t *domain.StrmTask) bool {
-	path = strings.TrimSuffix(path, "/")
-	base := strings.TrimSuffix(strings.TrimSpace(t.Path), "/")
+	path = strings.Trim(path, "/")
+	base := strings.Trim(strings.TrimSpace(t.Path), "/")
 	if base == "" {
 		return true // 任务根为整个空间。
 	}

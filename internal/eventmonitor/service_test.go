@@ -62,6 +62,24 @@ func TestMatchTaskScope(t *testing.T) {
 			task: &domain.StrmTask{Path: "/媒体/电影", Recursive: true},
 			expect: true,
 		},
+		{
+			name: "前导斜杠差异：事件路径无斜杠、任务路径带斜杠",
+			path: "媒体/电影",
+			task: &domain.StrmTask{Path: "/媒体/电影", Recursive: true},
+			expect: true,
+		},
+		{
+			name: "前导斜杠差异：无斜杠事件路径命中子目录",
+			path: "媒体/电影/新电影A",
+			task: &domain.StrmTask{Path: "/媒体/电影", Recursive: true},
+			expect: true,
+		},
+		{
+			name: "前导斜杠差异：无斜杠事件路径不命中别的根",
+			path: "媒体/电影2/内容",
+			task: &domain.StrmTask{Path: "/媒体/电影", Recursive: true},
+			expect: false,
+		},
 	}
 	for _, c := range cases {
 		if got := matchTaskScope(c.path, c.task); got != c.expect {
