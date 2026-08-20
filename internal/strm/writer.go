@@ -7,6 +7,18 @@ import (
 	"strings"
 )
 
+var strmSafeNameRepl = strings.NewReplacer(
+	"/", "_",
+	"\\", "_",
+	":", "_",
+	"*", "_",
+	"?", "_",
+	"\"", "_",
+	"<", "_",
+	">", "_",
+	"|", "_",
+)
+
 func MediaStem(name string) string {
 	ext := filepath.Ext(name)
 	if ext == "" {
@@ -20,27 +32,59 @@ func SafeName(name string) string {
 	if name == "" {
 		return "_"
 	}
-	repl := strings.NewReplacer(
-		"/", "_",
-		"\\", "_",
-		":", "_",
-		"*", "_",
-		"?", "_",
-		"\"", "_",
-		"<", "_",
-		">", "_",
-		"|", "_",
-	)
-	name = repl.Replace(name)
+	name = strmSafeNameRepl.Replace(name)
 	if name == "" || name == "." || name == ".." {
 		return "_"
 	}
 	return name
 }
 
+// SafeStem 保留 STEM 前后空格，只替换非法字符；全空白 / 空串 / 点目录名兜底为 _。
+// 用于 STRM 文件名，保证「飞驰人生 .mp4」这类文件名生成的 STRM 保留扩展名前的空格。
+func SafeStem(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "_"
+	}
+	name = strmSafeNameRepl.Replace(name)
+	if name == "" || name == "." || name == ".." {
+		return "_"
+	}
+	return name
+}
+
+// SafeDirSegments 把相对目录字符串拆成安全目录段：
+// 容错前后斜杠与反斜杠、压缩空段，并跳过 "." 与 ".."。
+func SafeDirSegments(raw string) []string {
+	raw = strings.ReplaceAll(strings.TrimSpace(raw), "\\", "/")
+	raw = strings.Trim(raw, "/")
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, seg := range strings.Split(raw, "/") {
+		seg = strings.TrimSpace(seg)
+		if seg == "" || seg == "." || seg == ".." {
+			continue
+		}
+		out = append(out, SafeName(seg))
+	}
+	return out
+}
+
+// NormalizeGroupDir 归一化分组目录，返回存库用的相对路径（如 "电影/港台"，空为根目录）。
+func NormalizeGroupDir(raw string) string {
+	return strings.Join(SafeDirSegments(raw), "/")
+}
+
+// TaskRelDir 返回任务在 STRM 根下的相对目录（分组目录 + 输出文件夹）。
+func TaskRelDir(groupDir, outputFolder string) string {
+	segs := SafeDirSegments(groupDir)
+	segs = append(segs, SafeName(outputFolder))
+	return strings.Join(segs, "/")
+}
+
 func LocalRelPath(outputFolder string, relDirs []string, fileName string, isoFilenameEnabled bool) string {
-	parts := make([]string, 0, len(relDirs)+2)
-	parts = append(parts, SafeName(outputFolder))
+	parts := SafeDirSegments(outputFolder)
 	for _, dir := range relDirs {
 		parts = append(parts, SafeName(dir))
 	}
@@ -56,7 +100,7 @@ func LocalStrmFileName(fileName string, isoFilenameEnabled bool) string {
 	if isoFilenameEnabled && isISOFileName(fileName) {
 		return SafeName(fileName) + ".strm"
 	}
-	return SafeName(MediaStem(fileName)) + ".strm"
+	return SafeStem(MediaStem(fileName)) + ".strm"
 }
 
 func isISOFileName(fileName string) bool {
@@ -110,15 +154,15 @@ func strmContentReferencesFile(content, fileID string) bool {
 }
 
 func TaskOutputDir(strmDir, outputFolder string) string {
-	outputFolder = strings.TrimSpace(outputFolder)
-	if outputFolder == "" {
+	segs := SafeDirSegments(outputFolder)
+	if len(segs) == 0 {
 		return ""
 	}
 	root := strings.TrimSpace(strmDir)
 	if root == "" {
 		root = "strm"
 	}
-	return filepath.Join(root, SafeName(outputFolder))
+	return filepath.Join(append([]string{root}, segs...)...)
 }
 
 func DeleteTaskOutput(strmDir, outputFolder string) error {

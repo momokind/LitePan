@@ -23,13 +23,13 @@ const (
 	KeyFuseReadCacheRetentionDays  = "fuse_read_cache_retention_days"
 	KeyFuseReadCacheEvictionPolicy = "fuse_read_cache_eviction_policy"
 	KeyAuthActiveRefresh           = "auth_active_refresh_enabled"
+	KeyAccountShowProfile          = "account_show_profile"
+	KeyAccountShowMembership       = "account_show_membership"
 	KeyLogLevel                    = "log_level"
 	KeyLogRetentionDays            = "log_retention_days"
 	KeyLogErrorAckAt               = "log_error_ack_at"
 	KeyEmbyEnabled                 = "emby_enabled"
-	KeyEmbyURL                     = "emby_url"
-	KeyEmbyAPIKey                  = "emby_api_key"
-	KeyEmbyProxyPort               = "emby_proxy_port"
+	KeyEmbyProxyInstances          = "emby_proxy_instances"
 	KeyFnosEnabled                 = "fnos_enabled"
 	KeyFnosURL                     = "fnos_url"
 	KeyFnosProxyPort               = "fnos_proxy_port"
@@ -47,6 +47,10 @@ const (
 	KeyStrmMetadataMaxSizeMB       = "strm_metadata_max_size_mb"
 	KeyStrmMetadataParentEnabled   = "strm_metadata_parent_enabled"
 	KeyStrmMetadataSyncMode        = "strm_metadata_sync_mode"
+	KeyStrmTool115TreeEnabled      = "strm_tool_115_tree_enabled"
+	KeyLocalUploadEnabled          = "local_upload_enabled"
+	KeyLocalUploadMappings         = "local_upload_mappings"
+	KeyQuarkTVEnabled              = "quark_tv_enabled"
 	KeyStrmScrapeWriteMode         = "strm_scrape_write_mode"
 
 	KeyMOProxyEnabled          = "mo_proxy_enabled"
@@ -63,6 +67,10 @@ const (
 	KeyMOAlignMediaTags        = "mo_align_media_tags"
 	KeyMOMaxWorksPerRun        = "mo_max_works_per_run"
 	KeyMOOverwriteExisting     = "mo_overwrite_existing"
+	KeyAIOrganizeEnabled       = "ai_organize_enabled"
+	KeyAIOrganizeBaseURL       = "ai_organize_base_url"
+	KeyAIOrganizeAPIKey        = "ai_organize_api_key"
+	KeyAIOrganizeModel         = "ai_organize_model"
 )
 
 // Type 决定后台表单控件与校验方式。
@@ -144,6 +152,8 @@ func defaultSpecs() []Spec {
 			{Value: "large_file", Label: "大文件优先"},
 		}),
 		boolSpec(KeyAuthActiveRefresh, "system", "智能主动认证刷新", "后台按 token 有效期预刷新、Cookie 健康检查；关闭后仅保留被动刷新。", "true"),
+		boolSpec(KeyAccountShowProfile, "account_display", "显示账号信息", "在网盘账号卡片第二行显示昵称、手机号或邮箱；关闭后显示创建时间。", "true"),
+		boolSpec(KeyAccountShowMembership, "account_display", "显示会员标签", "在网盘账号名称后显示该网盘返回的 VIP 或 SVIP 标签。", "true"),
 		selectSpec(KeyLogLevel, "system", "日志级别", "控制控制台与落盘日志的最低级别；认证调度、刷新结果等默认可在 Info 查看。", "info", []Option{
 			{Value: "debug", Label: "Debug（调试）"},
 			{Value: "info", Label: "Info（常规）"},
@@ -151,10 +161,8 @@ func defaultSpecs() []Spec {
 			{Value: "error", Label: "Error（错误）"},
 		}),
 		intSpec(KeyLogRetentionDays, "system", "日志保留天数", "按天落盘日志的保留期。自动清理与日志页手动清理都会按该天数删除更早的旧日志。", "30", "天", 1, 365),
-		boolSpec(KeyEmbyEnabled, "emby", "启用 Emby 反代", "开启后且填写反代端口时，LitePan 会启动 Emby 反代服务；不填端口时仅保存 Emby 连接配置。", "false"),
-		stringSpec(KeyEmbyURL, "emby", "Emby 地址", "用于 Emby 反代与后续自动化刷库，例如 http://192.168.1.10:8096。", ""),
-		stringSpec(KeyEmbyAPIKey, "emby", "Emby API Key", "用于访问 Emby 管理 API。返回后台时会脱敏显示。", ""),
-		stringSpec(KeyEmbyProxyPort, "emby", "反代端口", "可留空。填写并启用后，LitePan 会在该端口启动 Emby 反代服务。", ""),
+		{Key: KeyEmbyEnabled, Type: TypeBool, Default: "false", Hidden: true},
+		{Key: KeyEmbyProxyInstances, Type: TypeString, Default: "[]", Sensitive: true, Hidden: true},
 		boolSpec(KeyFnosEnabled, "fnos", "启用飞牛影视反代", "开启后且填写反代端口时，LitePan 会启动飞牛影视反代服务。", "false"),
 		stringSpec(KeyFnosURL, "fnos", "飞牛影视地址", "飞牛影视服务地址，默认端口 8005，例如 http://192.168.1.10:8005。", ""),
 		stringSpec(KeyFnosProxyPort, "fnos", "反代端口", "可留空。填写并启用后，LitePan 会在该端口启动飞牛影视反代服务。", ""),
@@ -171,6 +179,7 @@ func defaultSpecs() []Spec {
 		stringSpec(KeyStrmMetadataExtensions, "strm", "元数据扩展名", "任务开启同步元数据时使用的扩展名，英文分号分隔。", "srt;ass;ssa;sub;sup;idx;vtt;nfo;jpg;jpeg;png;webp;bmp;gif"),
 		intSpec(KeyStrmMetadataMaxSizeMB, "strm", "元数据大小上限", "同步元数据时忽略超过该大小的文件。", "10", "MB", 1, 1024),
 		boolSpec(KeyStrmMetadataParentEnabled, "strm", "父目录元数据同步", "子目录有影片时，也同步父目录下的海报、nfo 等元数据。", "true"),
+		boolSpec(KeyStrmTool115TreeEnabled, "strm", "115 网盘 STRM 增强（目录树清单模式）", "开启后 115Open 账号的 STRM 任务改用全量清单 + 增量对账方式执行，减少逐目录递归请求；配了分支的任务维持原逻辑。", "false"),
 		selectSpec(KeyStrmMetadataSyncMode, "strm", "元数据同步策略", "local_primary=保留本地并从云端补缺；cloud_primary=本地目录与云端保持一致；bidirectional=本地与云端互相补缺。", "local_primary", []Option{
 			{Value: "cloud_primary", Label: "网盘元数据为主"},
 			{Value: "local_primary", Label: "本地元数据补缺"},
@@ -192,6 +201,31 @@ func defaultSpecs() []Spec {
 		intSpec(KeyMOMaxWorksPerRun, "media_organize", "每次最多整理作品数", "单次执行最多处理的作品数，0 表示不限制。", "50", "", 0, 10000),
 		boolSpec(KeyMOOverwriteExisting, "media_organize", "同名冲突时覆盖", "目标位置已有同名文件时覆盖，默认跳过。", "false"),
 		{
+			Key:     KeyAIOrganizeEnabled,
+			Type:    TypeBool,
+			Default: "false",
+			Hidden:  true,
+		},
+		{
+			Key:     KeyAIOrganizeBaseURL,
+			Type:    TypeString,
+			Default: "https://api.deepseek.com",
+			Hidden:  true,
+		},
+		{
+			Key:       KeyAIOrganizeAPIKey,
+			Type:      TypeString,
+			Default:   "",
+			Sensitive: true,
+			Hidden:    true,
+		},
+		{
+			Key:     KeyAIOrganizeModel,
+			Type:    TypeString,
+			Default: "deepseek-chat",
+			Hidden:  true,
+		},
+		{
 			Key:         KeyOAuthServerURL,
 			Type:        TypeString,
 			Category:    "system",
@@ -206,6 +240,24 @@ func defaultSpecs() []Spec {
 			Default: "",
 			Hidden:  true,
 		},
+		{
+			Key:     KeyLocalUploadEnabled,
+			Type:    TypeBool,
+			Default: "false",
+			Hidden:  true,
+		},
+		{
+			Key:     KeyLocalUploadMappings,
+			Type:    TypeString,
+			Default: "[]",
+			Hidden:  true,
+		},
+		{
+			Key:     KeyQuarkTVEnabled,
+			Type:    TypeBool,
+			Default: "false",
+			Hidden:  true,
+		},
 	}
 }
 
@@ -213,6 +265,7 @@ func defaultSpecs() []Spec {
 func categories() []Category {
 	return []Category{
 		{ID: "system", Label: "系统设置"},
+		{ID: "account_display", Label: "网盘账号显示"},
 		{ID: "performance", Label: "性能设置"},
 		{ID: "strm", Label: "STRM 设置"},
 		{ID: "media_organize", Label: "媒体整理设置"},

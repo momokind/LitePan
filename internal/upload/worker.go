@@ -16,6 +16,7 @@ import (
 	"litepan/internal/driver"
 	"litepan/internal/eventbus"
 	"litepan/pkg/speedsmoother"
+	"litepan/pkg/timeutil"
 )
 
 func (m *Manager) executeCrossTransferDownload(ctx context.Context, taskID string) bool {
@@ -80,7 +81,7 @@ func (m *Manager) executeCrossTransferDownload(ctx context.Context, taskID strin
 		return false
 	}
 
-	res, err := m.playback.Resolve(ctx, sourceAccountID, sourceFileID, "", false)
+	res, err := m.playback.Resolve(ctx, sourceAccountID, sourceFileID, "", false, false)
 	if err != nil {
 		m.finishCrossTransferDownloadError(ctx, taskID, translateError(err.Error()))
 		return false
@@ -437,24 +438,43 @@ func shouldResetResumeState(errMsg string) bool {
 	return strings.Contains(lower, "invalidpartorder") || strings.Contains(lower, "previous part hash context")
 }
 
+const downloadPersistInterval = 2 * time.Second
+
 func (m *Manager) updateDownloadProgress(taskID string, downloaded, total int64, message string, speed float64) {
 	if total <= 0 {
 		total = 1
 	}
 	progress := calcProgress(downloaded, total)
-	m.patch(taskID, func(st *taskState) {
-		if st.Status == StatusSuccess || st.Status == StatusSkipped {
-			return
-		}
-		st.Status = StatusRunning
-		st.Phase = PhaseDownloading
-		st.Progress = progress
-		st.DownloadedBytes = downloaded
-		st.TotalBytes = total
-		st.SpeedBytesPerSecond = speed
-		st.Message = message
-		st.Error = ""
-	})
+	now := time.Now()
+	var snap *taskState
+	m.mu.Lock()
+	st, ok := m.tasks[taskID]
+	if !ok {
+		m.mu.Unlock()
+		return
+	}
+	if st.Status == StatusSuccess || st.Status == StatusSkipped {
+		m.mu.Unlock()
+		return
+	}
+	st.Status = StatusRunning
+	st.Phase = PhaseDownloading
+	st.Progress = progress
+	st.DownloadedBytes = downloaded
+	st.TotalBytes = total
+	st.SpeedBytesPerSecond = speed
+	st.Message = message
+	st.Error = ""
+	st.UpdatedAt = timeutil.UnixFloat(now)
+	if st.lastEmit.IsZero() || now.Sub(st.lastEmit) >= downloadPersistInterval || downloaded >= total {
+		st.lastEmit = now
+		snap = st
+	}
+	m.mu.Unlock()
+	if snap != nil {
+		_ = m.persistTask(snap)
+	}
+	m.broadcast()
 }
 
 func (m *Manager) finishCrossTransferDownloadError(ctx context.Context, taskID, errMsg string) {
@@ -509,7 +529,7 @@ func (m *Manager) resolveCrossTransferTarget(ctx context.Context, taskID string)
 	displayPath := st.TargetDisplayPath
 	m.mu.Unlock()
 
-	folderID, err := ensureUploadTargetDir(ctx, m.files, accountID, rootID, relDir)
+	folderID, err := ensureUploadTargetDir(ctx, m.files, m.targetDirCache, accountID, rootID, relDir)
 	if err != nil {
 		return "", "", err
 	}
@@ -586,6 +606,23 @@ func (m *Manager) deleteUploadedFile(ctx context.Context, st *taskState) error {
 	}
 	m.publishUploadedFileDeleted(st, raw)
 	return nil
+}
+
+// deleteUploadedFiles 批量删除已上传的网盘文件（一次请求，驱动支持批量删除）。
+func (m *Manager) deleteUploadedFiles(ctx context.Context, accountID int64, fileIDs []string) error {
+	if len(fileIDs) == 0 {
+		return nil
+	}
+	if err := m.exec.Check(ctx, accountID); err != nil {
+		return err
+	}
+	return m.exec.Run(ctx, accountID, func(drv driver.Driver) error {
+		deleter, err := driverexec.Require[driver.Deleter](drv)
+		if err != nil {
+			return err
+		}
+		return deleter.DeleteFiles(ctx, fileIDs)
+	})
 }
 
 func (m *Manager) publishUploadedFileDeleted(st *taskState, fileID string) {

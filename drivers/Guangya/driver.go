@@ -45,8 +45,9 @@ var config = driver.Config{
 	TokenLifetime:          7200 * time.Second,
 	RefreshAdvance:         15 * time.Minute,
 	ProvideHashes:          []string{"md5"},
-	RapidUploadHashes:      nil,
+	RapidUploadHashes:      []string{"md5"},
 	UploadConflictPolicies: []string{"rename"},
+	SupportsAccountProfile: true,
 }
 
 func New() driver.Driver { return &Driver{} }

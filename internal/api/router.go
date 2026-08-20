@@ -17,7 +17,9 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 
 	"litepan/internal/account"
+	"litepan/internal/accountprofile"
 	"litepan/internal/adminauth"
+	"litepan/internal/aiorganize"
 	"litepan/internal/apikey"
 	"litepan/internal/auth"
 	"litepan/internal/automation"
@@ -35,6 +37,7 @@ import (
 	"litepan/internal/notification"
 	"litepan/internal/offlinedownload"
 	"litepan/internal/playback"
+	"litepan/internal/quarktv"
 	"litepan/internal/settings"
 	"litepan/internal/share/dav"
 	"litepan/internal/strm"
@@ -49,6 +52,7 @@ var webFS embed.FS
 type Deps struct {
 	Logs              *logx.Manager
 	AccountSvc        *account.Service
+	AccountProfile    *accountprofile.Service
 	Accounts          domain.AccountRepository
 	Configs           domain.ConfigRepository
 	Settings          *settings.Service
@@ -62,18 +66,21 @@ type Deps struct {
 	Strm              *strm.Service
 	CacheRetention    *cacheretention.Service
 	MediaOrganize     *mediaorganize.Service
+	AIOrganize        *aiorganize.Service
 	StrmScrape        *strmscrape.Service
 	Automation        *automation.Service
 	Fuse              *fusemount.Service
 	CrossTransfer     *crosstransfer.Service
 	EmbyProxy         *embyproxy.Service
 	FnosProxy         *fnosproxy.Service
+	QuarkTV           *quarktv.Service
 	ApiKeys           *apikey.Service
 	Auth              *auth.Service
 	AuthSched         *auth.Scheduler
 	AdminAuth         *adminauth.Service
 	Notifications     *notification.Service
 	DataDir           string
+	StrmDir           string
 	OnSettingsUpdated func(map[string]string)
 }
 
@@ -82,6 +89,7 @@ type Handler struct {
 	logs              *logx.Manager
 	log               *slog.Logger
 	accountSvc        *account.Service
+	accountProfile    *accountprofile.Service
 	settings          *settings.Service
 	cache             *cache.Service
 	listHits          *cache.HitTracker
@@ -93,17 +101,21 @@ type Handler struct {
 	strm              *strm.Service
 	cacheRetention    *cacheretention.Service
 	mediaOrganize     *mediaorganize.Service
+	aiOrganize        *aiorganize.Service
 	strmScrape        *strmscrape.Service
 	automation        *automation.Service
 	fuse              *fusemount.Service
 	crossTransfer     *crosstransfer.Service
 	embyProxy         *embyproxy.Service
 	fnosProxy         *fnosproxy.Service
+	quarktv           *quarktv.Service
 	apiKeys           *apikey.Service
 	auth              *auth.Service
 	authSched         *auth.Scheduler
 	adminAuth         *adminauth.Service
 	notifications     *notification.Service
+	dataDir           string
+	strmDir           string
 	onSettingsUpdated func(map[string]string)
 
 	devMu       sync.Mutex
@@ -120,6 +132,7 @@ func NewRouter(d Deps) http.Handler {
 		logs:              d.Logs,
 		log:               apiLog,
 		accountSvc:        d.AccountSvc,
+		accountProfile:    d.AccountProfile,
 		settings:          d.Settings,
 		cache:             d.Cache,
 		listHits:          d.ListHitTracker,
@@ -131,17 +144,21 @@ func NewRouter(d Deps) http.Handler {
 		strm:              d.Strm,
 		cacheRetention:    d.CacheRetention,
 		mediaOrganize:     d.MediaOrganize,
+		aiOrganize:        d.AIOrganize,
 		strmScrape:        d.StrmScrape,
 		automation:        d.Automation,
 		fuse:              d.Fuse,
 		crossTransfer:     d.CrossTransfer,
 		embyProxy:         d.EmbyProxy,
 		fnosProxy:         d.FnosProxy,
+		quarktv:           d.QuarkTV,
 		apiKeys:           d.ApiKeys,
 		auth:              d.Auth,
 		authSched:         d.AuthSched,
 		adminAuth:         d.AdminAuth,
 		notifications:     d.Notifications,
+		dataDir:           d.DataDir,
+		strmDir:           d.StrmDir,
 		onSettingsUpdated: d.OnSettingsUpdated,
 	}
 
@@ -189,8 +206,8 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/system-config", h.adminSystemConfig)
 				r.Post("/update-credentials", h.adminUpdateCredentials)
 				r.Post("/webdav-config", h.adminWebDAVConfig)
-				r.Get("/emby/config", h.getEmbyConfig)
-				r.Put("/emby/config", h.updateEmbyConfig)
+				r.Get("/emby/configs", h.listEmbyConfigs)
+				r.Put("/emby/configs", h.replaceEmbyConfigs)
 				r.Post("/emby/test", h.testEmbyConfig)
 				r.Get("/emby/libraries", h.listEmbyLibraries)
 				r.Post("/emby/refresh", h.refreshEmbyLibrary)
@@ -209,6 +226,7 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/accounts/{id}/toggle", h.toggleAccount)
 				r.Post("/accounts/{id}/set-default", h.setDefaultAccount)
 				r.Post("/accounts/{id}/refresh-auth", h.refreshAccountAuth)
+				r.Post("/accounts/{id}/refresh-profile", h.refreshAccountProfile)
 				r.Get("/settings", h.getSettings)
 				r.Put("/settings", h.updateSettings)
 				r.Route("/api-keys", func(r chi.Router) {
@@ -261,6 +279,31 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/tasks/repair-account-references", h.repairStrmAccountReferences)
 					r.Post("/generate-current-directory", h.generateCurrentDirectoryStrm)
 					r.Post("/directory-status", h.checkStrmDirectoryStatus)
+				})
+				r.Route("/tools/115-strm", func(r chi.Router) {
+					r.Get("/status", h.get115StrmToolStatus)
+					r.Post("/enabled", h.set115StrmToolEnabled)
+					r.Post("/cache/clear", h.clear115StrmDirCache)
+				})
+				r.Route("/tools/local-upload", func(r chi.Router) {
+					r.Get("/config", h.getLocalUploadConfig)
+					r.Put("/config", h.updateLocalUploadConfig)
+					r.Post("/browse", h.browseLocalUpload)
+					r.Post("/upload", h.createLocalUploadTasks)
+				})
+				r.Route("/tools/ai-organize", func(r chi.Router) {
+					r.Get("/config", h.getAIOrganizeConfig)
+					r.Put("/config", h.updateAIOrganizeConfig)
+					r.Post("/test", h.testAIOrganizeConfig)
+				})
+				r.Route("/tools/quarktv", func(r chi.Router) {
+					r.Get("/status", h.getQuarkTVStatus)
+					r.Post("/enabled", h.setQuarkTVEnabled)
+					r.Get("/accounts", h.listQuarkTVAccounts)
+					r.Post("/bind/start", h.startQuarkTVBind)
+					r.Post("/bind/poll", h.pollQuarkTVBind)
+					r.Put("/binding/settings", h.updateQuarkTVBindingSettings)
+					r.Delete("/bind", h.unbindQuarkTV)
 				})
 				r.Route("/media-organize", func(r chi.Router) {
 					r.Get("/tasks", h.listMediaOrganizeTasks)

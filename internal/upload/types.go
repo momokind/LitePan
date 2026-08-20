@@ -60,6 +60,8 @@ const (
 	SourceTypeManual         = "manual"
 	SourceTypeCrossTransfer  = "cross_transfer"
 	SourceTypeOfflineHandoff = "offline_handoff"
+	// 服务器本地上传，删除任务时保留用户源文件。
+	SourceTypeServerLocal = "server_local"
 )
 
 const (
@@ -72,6 +74,8 @@ const (
 	CleanupLocalFileOnSuccess = "file_on_success"
 	CleanupLocalPathOnSuccess = "path_on_success"
 	CleanupLocalTreeOnSuccess = "tree_on_success"
+	// CleanupLocalModeKeep 表示上传成功后保留本地源文件（本机上传/备份场景）。
+	CleanupLocalModeKeep = "keep"
 )
 
 type taskState struct {
@@ -120,6 +124,7 @@ type ServerLocalCreateParams struct {
 	DriverType        string
 	FileName          string
 	DisplayName       string
+	SourceType        string
 	TargetPath        string
 	TargetDisplayPath string
 	LocalPath         string

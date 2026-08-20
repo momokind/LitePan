@@ -27,7 +27,7 @@ const (
 )
 
 type metadataResolver interface {
-	Resolve(ctx context.Context, accountID int64, fileID, ua string, refresh bool) (playback.Resolved, error)
+	Resolve(ctx context.Context, accountID int64, fileID, ua string, refresh, playback bool) (playback.Resolved, error)
 }
 
 type metadataSyncer struct {
@@ -373,7 +373,7 @@ func (m *metadataSyncer) downloadWithRetry(ctx context.Context, client *http.Cli
 func (m *metadataSyncer) resolve(ctx context.Context, accountID int64, fileID string, refresh bool) (playback.Resolved, error) {
 	m.resolveMu.Lock()
 	defer m.resolveMu.Unlock()
-	return m.playback.Resolve(ctx, accountID, fileID, "", refresh)
+	return m.playback.Resolve(ctx, accountID, fileID, "", refresh, false)
 }
 
 func (m *metadataSyncer) recordFailure(path, reason string) {
@@ -491,8 +491,8 @@ func isIntegrityMetadataErr(err error) bool {
 }
 
 func metadataRelPath(outputFolder string, relDirs []string, fileName string) string {
-	parts := make([]string, 0, len(relDirs)+2)
-	parts = append(parts, SafeName(outputFolder))
+	parts := make([]string, 0, len(relDirs)+len(SafeDirSegments(outputFolder))+1)
+	parts = append(parts, SafeDirSegments(outputFolder)...)
 	for _, dir := range relDirs {
 		parts = append(parts, SafeName(dir))
 	}

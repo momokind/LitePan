@@ -54,8 +54,12 @@ type Manager struct {
 	runningDownloads       int
 	runCond                sync.Cond
 	subs                   map[chan []byte]struct{}
+	broadcastPending       bool
+	broadcastDirty         bool
 	subMu                  sync.Mutex
+	clientTaskIndex        map[string]string
 	tempRegistry           *TempRegistry
+	targetDirCache         *uploadTargetDirCache
 	completedOfflineGroups map[string]struct{}
 	runCtx                 context.Context
 	runCancel              context.CancelFunc
@@ -80,6 +84,8 @@ func NewManager(opts Options) *Manager {
 		tasks:                  make(map[string]*taskState),
 		limit:                  defaultLimit,
 		subs:                   make(map[chan []byte]struct{}),
+		clientTaskIndex:        make(map[string]string),
+		targetDirCache:         newUploadTargetDirCache(),
 		completedOfflineGroups: make(map[string]struct{}),
 		runCtx:                 runCtx,
 		runCancel:              runCancel,
@@ -107,8 +113,11 @@ func (m *Manager) Create(ctx context.Context, p CreateParams) (*Task, error) {
 	return tasks[0], nil
 }
 
-// RenameTask 在上传任务尚未开始传输时更新目标文件名与目标目录。
-// 返回 renamed=false 表示任务已开始或已完成，本次改名未生效（调用方不应因此报错）。
+func (m *Manager) CreateBatch(ctx context.Context, params []CreateParams) ([]*Task, error) {
+	return m.createBatch(ctx, params)
+}
+
+// RenameTask 仅修改尚未开始的任务。
 func (m *Manager) RenameTask(_ context.Context, taskID, newName, newTargetPath, newDisplayPath string) (bool, error) {
 	name := strings.TrimSpace(newName)
 	if name == "" {
@@ -157,7 +166,7 @@ func (m *Manager) createBatch(ctx context.Context, params []CreateParams) ([]*Ta
 			continue
 		}
 		st := m.newTaskStateLocked(p)
-		m.tasks[st.TaskID] = st
+		m.addTaskLocked(st)
 		created = append(created, st)
 		result[i] = m.snapshot(st)
 	}
@@ -168,7 +177,7 @@ func (m *Manager) createBatch(ctx context.Context, params []CreateParams) ([]*Ta
 		if err := m.persistTask(st); err != nil {
 			m.mu.Lock()
 			for _, item := range created {
-				delete(m.tasks, item.TaskID)
+				m.removeTaskLocked(item.TaskID)
 			}
 			m.mu.Unlock()
 			for _, id := range persisted {
@@ -187,7 +196,40 @@ func (m *Manager) createBatch(ctx context.Context, params []CreateParams) ([]*Ta
 	return result, nil
 }
 
-// Stop 取消并等待全部上传与跨盘任务退出，确保后续可以安全关闭任务仓储。
+func normalizeClientTaskID(clientTaskID string) string {
+	return strings.TrimSpace(clientTaskID)
+}
+
+func (m *Manager) addTaskLocked(st *taskState) {
+	if st == nil {
+		return
+	}
+	m.tasks[st.TaskID] = st
+	clientTaskID := normalizeClientTaskID(st.ClientTaskID)
+	if clientTaskID == "" {
+		return
+	}
+	if m.clientTaskIndex == nil {
+		m.clientTaskIndex = make(map[string]string)
+	}
+	m.clientTaskIndex[clientTaskID] = st.TaskID
+}
+
+func (m *Manager) removeTaskLocked(taskID string) *taskState {
+	st, ok := m.tasks[taskID]
+	if !ok {
+		return nil
+	}
+	delete(m.tasks, taskID)
+	clientTaskID := normalizeClientTaskID(st.ClientTaskID)
+	if clientTaskID != "" {
+		if indexedID, ok := m.clientTaskIndex[clientTaskID]; ok && indexedID == taskID {
+			delete(m.clientTaskIndex, clientTaskID)
+		}
+	}
+	return st
+}
+
 func (m *Manager) Stop(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -329,18 +371,23 @@ func (m *Manager) CreateServerLocalTask(ctx context.Context, p ServerLocalCreate
 	return tasks[0], nil
 }
 
-// CreateServerLocalTasks 会先校验全部本地文件，再一次性持久化并启动任务。
-// 任一任务写库失败时，整批任务都不会进入运行队列。
 func (m *Manager) CreateServerLocalTasks(ctx context.Context, params []ServerLocalCreateParams) ([]*Task, error) {
 	if len(params) == 0 {
-		return nil, domain.Errorf(domain.CodeValidation, "离线交棒任务不能为空")
+		return nil, domain.Errorf(domain.CodeValidation, "服务器上传任务不能为空")
 	}
 	result := make([]*Task, len(params))
 	prepared := make([]CreateParams, 0, len(params))
 	preparedIndexes := make([]int, 0, len(params))
 	for i, p := range params {
 		if strings.TrimSpace(p.LocalPath) == "" {
-			return nil, domain.Errorf(domain.CodeValidation, "离线交棒缺少本地文件路径")
+			return nil, domain.Errorf(domain.CodeValidation, "服务器上传缺少本地文件路径")
+		}
+		sourceType := strings.TrimSpace(p.SourceType)
+		if sourceType == "" {
+			sourceType = SourceTypeOfflineHandoff
+		}
+		if sourceType != SourceTypeOfflineHandoff && sourceType != SourceTypeServerLocal {
+			return nil, domain.Errorf(domain.CodeValidation, "服务器上传来源类型不合法")
 		}
 		if p.ClientTaskID != "" {
 			if existing := m.FindByClientTaskID(p.ClientTaskID); existing != nil {
@@ -366,7 +413,7 @@ func (m *Manager) CreateServerLocalTasks(ctx context.Context, params []ServerLoc
 			DriverType:        p.DriverType,
 			FileName:          p.FileName,
 			DisplayName:       p.DisplayName,
-			SourceType:        SourceTypeOfflineHandoff,
+			SourceType:        sourceType,
 			TargetPath:        p.TargetPath,
 			TargetDisplayPath: p.TargetDisplayPath,
 			LocalPath:         p.LocalPath,
@@ -392,12 +439,22 @@ func (m *Manager) CreateServerLocalTasks(ctx context.Context, params []ServerLoc
 }
 
 func (m *Manager) findByClientTaskIDLocked(clientTaskID string) *taskState {
-	clientTaskID = strings.TrimSpace(clientTaskID)
+	clientTaskID = normalizeClientTaskID(clientTaskID)
 	if clientTaskID == "" {
 		return nil
 	}
+	if taskID, ok := m.clientTaskIndex[clientTaskID]; ok {
+		if st, exists := m.tasks[taskID]; exists && normalizeClientTaskID(st.ClientTaskID) == clientTaskID {
+			return st
+		}
+		delete(m.clientTaskIndex, clientTaskID)
+	}
 	for _, st := range m.tasks {
-		if st.ClientTaskID == clientTaskID {
+		if normalizeClientTaskID(st.ClientTaskID) == clientTaskID {
+			if m.clientTaskIndex == nil {
+				m.clientTaskIndex = make(map[string]string)
+			}
+			m.clientTaskIndex[clientTaskID] = st.TaskID
 			return st
 		}
 	}
@@ -454,8 +511,6 @@ func (m *Manager) Get(_ context.Context, taskID string) (*Task, bool) {
 	return t, true
 }
 
-// RemoveTasksByAccount 清理无法在账号删除后继续执行的上传任务。
-// 目标账号被删除时全部清理；源账号被删除时，只清理仍处于源盘下载阶段的跨盘任务。
 func (m *Manager) RemoveTasksByAccount(ctx context.Context, accountID int64) (int64, error) {
 	if accountID <= 0 {
 		return 0, nil

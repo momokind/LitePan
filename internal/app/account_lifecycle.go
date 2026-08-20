@@ -11,6 +11,7 @@ import (
 	"litepan/internal/fusereadcache"
 	"litepan/internal/mediaorganize"
 	"litepan/internal/offlinedownload"
+	"litepan/internal/quarktv"
 	"litepan/internal/strm"
 	"litepan/internal/upload"
 )
@@ -19,11 +20,13 @@ type accountLifecycle struct {
 	fuse      *fusemount.Service
 	readCache *fusereadcache.Service
 	strm      *strm.Coordinator
+	strmSvc   *strm.Service
 	retention *cacheretention.Coordinator
 	media     *mediaorganize.Service
 	favorites *favorites.Service
 	offline   *offlinedownload.Service
 	uploads   *upload.Manager
+	quarktv   *quarktv.Service
 }
 
 func (a accountLifecycle) OnAccountDisabled(ctx context.Context, accountID int64) {
@@ -69,6 +72,11 @@ func (a accountLifecycle) OnAccountDeleted(ctx context.Context, accountID int64)
 			return fmt.Errorf("清理 STRM 任务失败: %w", err)
 		}
 	}
+	if a.strmSvc != nil {
+		if _, err := a.strmSvc.ClearDirCache(ctx, accountID); err != nil {
+			return fmt.Errorf("清理 STRM 路径映射表失败: %w", err)
+		}
+	}
 	if a.retention != nil {
 		if _, err := a.retention.RemoveTasksByAccount(ctx, accountID); err != nil {
 			return fmt.Errorf("清理缓存保持任务失败: %w", err)
@@ -92,6 +100,11 @@ func (a accountLifecycle) OnAccountDeleted(ctx context.Context, accountID int64)
 	if a.uploads != nil {
 		if _, err := a.uploads.RemoveTasksByAccount(ctx, accountID); err != nil {
 			return fmt.Errorf("清理上传任务失败: %w", err)
+		}
+	}
+	if a.quarktv != nil {
+		if err := a.quarktv.DeleteBinding(ctx, accountID); err != nil {
+			return fmt.Errorf("清理夸克 TV 绑定失败: %w", err)
 		}
 	}
 	return nil

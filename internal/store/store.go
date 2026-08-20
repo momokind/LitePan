@@ -12,6 +12,7 @@ type Store struct {
 	ApiKeys             domain.ApiKeyRepository
 	StrmTasks           domain.StrmTaskRepository
 	StrmBranches        domain.StrmBranchRepository
+	StrmDirCache        domain.StrmDirCacheRepository
 	UploadTasks         domain.UploadTaskRepository
 	OfflineDownloads    domain.OfflineDownloadTaskRepository
 	MediaOrganizeTasks  domain.MediaOrganizeTaskRepository
@@ -19,6 +20,7 @@ type Store struct {
 	CacheRetentionTasks domain.CacheRetentionTaskRepository
 	AutomationRules     domain.AutomationRuleRepository
 	AutomationRuns      domain.AutomationRunRepository
+	QuarkTVBindings     domain.QuarkTVBindingRepository
 }
 
 // New 基于已打开的 DB 构造仓储集合。
@@ -32,6 +34,7 @@ func New(db *DB) *Store {
 		ApiKeys:             &apiKeyRepo{db: db},
 		StrmTasks:           &strmTaskRepo{db: db},
 		StrmBranches:        &strmBranchRepo{db: db},
+		StrmDirCache:        &strmDirCacheRepo{db: db},
 		UploadTasks:         &uploadTaskRepo{db: db},
 		OfflineDownloads:    &offlineDownloadTaskRepo{db: db},
 		MediaOrganizeTasks:  &mediaOrganizeTaskRepo{db: db},
@@ -39,5 +42,6 @@ func New(db *DB) *Store {
 		CacheRetentionTasks: &cacheRetentionRepo{db: db},
 		AutomationRules:     &automationRuleRepo{db: db},
 		AutomationRuns:      &automationRunRepo{db: db},
+		QuarkTVBindings:     &quarktvBindingRepo{db: db},
 	}
 }

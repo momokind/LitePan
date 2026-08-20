@@ -214,7 +214,7 @@ func (s *Service) prepareCurrentDirectoryWork(ctx context.Context, accountID int
 	if task == nil {
 		return nil, nil
 	}
-	outputFolder := task.OutputFolder
+	outputFolder := TaskRelDir(task.GroupDir, task.OutputFolder)
 	if outputFolder == "" {
 		outputFolder = task.Name
 	}
@@ -363,10 +363,7 @@ func matchTaskForDisplayPath(tasks []*domain.StrmTask, currentPath string) (*dom
 }
 
 func cleanupCurrentDirectoryStrm(root, outputFolder string, relDirs []string, seen map[string]struct{}, remoteDirNames map[string]struct{}) (int64, error) {
-	currentLocalDir := filepath.Join(root, SafeName(outputFolder))
-	for _, dir := range relDirs {
-		currentLocalDir = filepath.Join(currentLocalDir, SafeName(dir))
-	}
+	currentLocalDir := localTaskDir(root, outputFolder, relDirs)
 	if pathHasOversizedComponent(currentLocalDir) {
 		return 0, nil
 	}

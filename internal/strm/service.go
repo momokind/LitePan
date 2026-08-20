@@ -30,6 +30,7 @@ type RunningAccountLister interface {
 type Service struct {
 	repo       domain.StrmTaskRepository
 	branches   domain.StrmBranchRepository
+	dirCache   domain.StrmDirCacheRepository
 	files      *file.Service
 	playback   *playback.Service
 	settings   *settings.Service
@@ -59,6 +60,7 @@ type Service struct {
 type ServiceOptions struct {
 	Repo       domain.StrmTaskRepository
 	Branches   domain.StrmBranchRepository
+	DirCache   domain.StrmDirCacheRepository
 	Files      *file.Service
 	Playback   *playback.Service
 	Settings   *settings.Service
@@ -82,6 +84,7 @@ func NewService(opts ServiceOptions) *Service {
 	return &Service{
 		repo:            opts.Repo,
 		branches:        opts.Branches,
+		dirCache:        opts.DirCache,
 		files:           opts.Files,
 		playback:        opts.Playback,
 		settings:        opts.Settings,
@@ -291,6 +294,7 @@ func (s *Service) UpdateTask(ctx context.Context, id int64, task *domain.StrmTas
 	existing.ScanMode = task.ScanMode
 	existing.Extensions = task.Extensions
 	existing.OutputFolder = task.OutputFolder
+	existing.GroupDir = task.GroupDir
 	existing.ApiInterval = task.ApiInterval
 	existing.ExcludeDirKeywords = task.ExcludeDirKeywords
 	existing.ExcludeFileKeywords = task.ExcludeFileKeywords
@@ -320,10 +324,7 @@ func (s *Service) DeleteTask(ctx context.Context, id int64, deleteStrmFiles bool
 		return err
 	}
 	_, _ = s.ForceStopTask(ctx, id)
-	outputFolder := strings.TrimSpace(task.OutputFolder)
-	if outputFolder == "" {
-		outputFolder = task.Name
-	}
+	outputFolder := TaskRelDir(task.GroupDir, task.OutputFolder)
 	if deleteStrmFiles {
 		if err := DeleteTaskOutput(s.strmDir, outputFolder); err != nil {
 			return err
@@ -503,6 +504,7 @@ func (s *Service) normalizeTask(task domain.StrmTask) domain.StrmTask {
 	if task.OutputFolder == "" {
 		task.OutputFolder = task.Name
 	}
+	task.GroupDir = NormalizeGroupDir(task.GroupDir)
 	if task.ScanInterval <= 0 {
 		task.ScanInterval = s.settings.Int(settings.KeyStrmDefaultScanInterval)
 	}
@@ -611,6 +613,7 @@ func (s *Service) scanSettings() ScanSettings {
 		MetadataMaxSizeMB:     s.settings.Int(settings.KeyStrmMetadataMaxSizeMB),
 		MetadataParentEnabled: s.settings.Bool(settings.KeyStrmMetadataParentEnabled),
 		MetadataSyncMode:      normalizeMetadataSyncMode(s.settings.String(settings.KeyStrmMetadataSyncMode)),
+		Tool115TreeEnabled:    s.settings.Bool(settings.KeyStrmTool115TreeEnabled),
 	}
 }
 

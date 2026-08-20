@@ -18,12 +18,14 @@ const (
 	webBaseURL     = "https://www.guangyapan.com"
 
 	pathUserMe           = "/v1/user/me"
+	pathUserAssets       = "/assets/v1/get_assets"
 	pathFileList         = "/userres/v1/file/get_file_list"
 	pathFileInfoByID     = "/userres/v1/file/get_info_by_file_id"
 	pathFileDetail       = "/userres/v1/file/get_file_detail"
 	pathDownloadURL      = "/userres/v1/get_res_download_url"
 	pathUploadToken      = "/userres/v1/get_res_center_token"
-	pathCheckFlashUpload = "/userres/v1/check_can_flash_upload"
+	pathRapidUploadToken = "/nd.bizuserres.s/v1/get_res_center_token"
+	pathDeleteUploadTask = "/nd.bizuserres.s/v1/file/delete_upload_task"
 	pathUploadTaskInfo   = "/userres/v1/file/get_info_by_task_id"
 	pathCreateDir        = "/userres/v1/file/create_dir"
 	pathRename           = "/userres/v1/file/rename"
@@ -169,6 +171,12 @@ func (d *Driver) accountGET(ctx context.Context, path string, out any) error {
 	resp, data, err := httpx.Execute(d.client, req, httpx.DefaultReadLimit)
 	if err != nil {
 		return domain.Wrap(domain.CodeDriverError, err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return domain.Errf(domain.CodeAuthExpired)
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return domain.Errf(domain.CodePermissionDenied)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return domain.Errorf(domain.CodeDriverError, "光鸭账户 HTTP %d: %s", resp.StatusCode, httpx.Truncate(data, 300))

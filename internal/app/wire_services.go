@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"litepan/internal/account"
+	"litepan/internal/accountprofile"
+	"litepan/internal/aiorganize"
 	"litepan/internal/automation"
 	"litepan/internal/cacheretention"
 	"litepan/internal/config"
@@ -19,6 +21,7 @@ import (
 	"litepan/internal/mediaorganize"
 	"litepan/internal/offlinedownload"
 	"litepan/internal/playback"
+	"litepan/internal/quarktv"
 	"litepan/internal/settings"
 	"litepan/internal/strm"
 	"litepan/internal/strmscrape"
@@ -31,8 +34,10 @@ type servicesBundle struct {
 	offlineDownloads *offlinedownload.Service
 	playback         *playback.Service
 	account          *account.Service
+	accountProfile   *accountprofile.Service
 	strm             *strm.Service
 	mediaOrganize    *mediaorganize.Service
+	aiOrganize       *aiorganize.Service
 	strmScrape       *strmscrape.Service
 	automation       *automation.Service
 	fuse             *fusemount.Service
@@ -42,6 +47,7 @@ type servicesBundle struct {
 	embyProxy        *embyproxy.Service
 	fnosProxy        *fnosproxy.Service
 	favorites        *favorites.Service
+	quarktv          *quarktv.Service
 }
 
 func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *coreBundle) *servicesBundle {
@@ -52,7 +58,8 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	strmSvc, coord := wireSTRM(st, fileSvc, playbackSvc, core.bus, logs, cfg.DataDir, cfg.StrmDir, cfg.ListenAddr, core.secret)
 	core.strm = coord
 	retentionSvc, retentionCoord := wireCacheRetention(st, fileSvc, core.cache, core.bus, logs)
-	mediaOrganizeSvc := wireMediaOrganize(st, fileSvc, logs, cfg.DataDir)
+	aiOrganizeSvc := aiorganize.New(st.settings)
+	mediaOrganizeSvc := wireMediaOrganize(st, fileSvc, logs, cfg.DataDir, aiOrganizeSvc)
 	strmScrapeSvc := strmscrape.New(strmscrape.Options{
 		Strm:     strmSvc,
 		Settings: st.settings,
@@ -76,6 +83,7 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		Bus:      core.bus,
 		Log:      logs.For(logx.ModuleFileOp),
 	})
+	fusemount.ApplyConfiguredMountRoot(context.Background(), st.store.Configs)
 	fuseSvc := fusemount.New(fusemount.Options{
 		Repo:      st.store.FuseMounts,
 		Configs:   st.store.Configs,
@@ -92,6 +100,7 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		fuse:      fuseSvc,
 		readCache: fuseReadCache,
 		strm:      coord,
+		strmSvc:   strmSvc,
 		retention: retentionCoord,
 		media:     mediaOrganizeSvc,
 		favorites: favoritesSvc,
@@ -109,6 +118,17 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 			return domain.NormalizeOAuthServerURL(st.settings.String(settings.KeyOAuthServerURL))
 		},
 	})
+	accountProfileSvc := accountprofile.New(core.exec)
+	quarktvSvc := quarktv.New(quarktv.Options{
+		Settings:       st.settings,
+		Bindings:       st.store.QuarkTVBindings,
+		Accounts:       st.store.Accounts,
+		AccountProfile: accountProfileSvc,
+		Bus:            core.bus,
+		Log:            logs.For(logx.ModuleSystem),
+	})
+	playbackSvc.SetDownloadResolverHook(quarktvSvc.ResolveHook)
+	lifecycle.quarktv = quarktvSvc
 	uploadSvc := upload.NewManager(upload.Options{
 		Exec:     core.exec,
 		Files:    fileSvc,
@@ -136,11 +156,12 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		Log:      logs.For(logx.ModuleSystem),
 	})
 	fnosProxySvc := fnosproxy.New(fnosproxy.Options{
-		Settings: st.settings,
-		Playback: playbackSvc,
-		Strm:     strmSvc,
-		StrmDir:  cfg.StrmDir,
-		Log:      logs.For(logx.ModuleSystem),
+		Settings:       st.settings,
+		Playback:       playbackSvc,
+		Strm:           strmSvc,
+		StrmDir:        cfg.StrmDir,
+		Log:            logs.For(logx.ModuleSystem),
+		PortUsedByEmby: embyProxySvc.UsesPort,
 	})
 	automationSvc := automation.New(automation.Options{
 		Rules:      st.store.AutomationRules,
@@ -160,8 +181,10 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		offlineDownloads: offlineDownloadSvc,
 		playback:         playbackSvc,
 		account:          accountSvc,
+		accountProfile:   accountProfileSvc,
 		strm:             strmSvc,
 		mediaOrganize:    mediaOrganizeSvc,
+		aiOrganize:       aiOrganizeSvc,
 		strmScrape:       strmScrapeSvc,
 		automation:       automationSvc,
 		fuse:             fuseSvc,
@@ -171,5 +194,6 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		embyProxy:        embyProxySvc,
 		fnosProxy:        fnosProxySvc,
 		favorites:        favoritesSvc,
+		quarktv:          quarktvSvc,
 	}
 }
