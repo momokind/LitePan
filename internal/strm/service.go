@@ -370,15 +370,6 @@ func (s *Service) RunTaskNow(ctx context.Context, id int64, runMode string) (*do
 	if err != nil {
 		return nil, err
 	}
-	if s.isOrganizeBusy(task.AccountID) {
-		return nil, domain.Errorf(domain.CodeValidation, "同账号媒体整理任务执行中，请稍后再试")
-	}
-	if s.isRetentionBusy(task.AccountID) {
-		return nil, domain.Errorf(domain.CodeValidation, "同账号缓存保持任务执行中，请稍后再试")
-	}
-	if s.IsTaskFileOperationBusy(task.ID) {
-		return nil, domain.Errorf(domain.CodeValidation, "该 STRM 任务正在处理本地文件，请稍后再试")
-	}
 	if runMode == "" {
 		runMode = domain.StrmRunModeAuto
 	}
@@ -386,6 +377,15 @@ func (s *Service) RunTaskNow(ctx context.Context, id int64, runMode string) (*do
 	case domain.StrmRunModeAuto, domain.StrmRunModeFull, domain.StrmRunModeBranch:
 	default:
 		runMode = domain.StrmRunModeAuto
+	}
+	if s.isOrganizeBusy(task.AccountID) {
+		return nil, s.enqueueRunRetry(task, runMode, "同账号媒体整理任务执行中，已加入队列稍后自动执行")
+	}
+	if s.isRetentionBusy(task.AccountID) {
+		return nil, s.enqueueRunRetry(task, runMode, "同账号缓存保持任务执行中，已加入队列稍后自动执行")
+	}
+	if s.IsTaskFileOperationBusy(task.ID) {
+		return nil, s.enqueueRunRetry(task, runMode, "该 STRM 任务正在处理本地文件，已加入队列稍后自动执行")
 	}
 	if rem := s.StartupRemaining(); rem > 0 {
 		s.mu.Lock()
@@ -399,6 +399,21 @@ func (s *Service) RunTaskNow(ctx context.Context, id int64, runMode string) (*do
 	s.mu.Unlock()
 	s.runTaskAsync(task)
 	return task, nil
+}
+
+// enqueueRunRetry 在账号级互斥（媒体整理/缓存保持/本地文件操作）期间把任务加入
+// 延迟执行队列，由 30s 调度周期在互斥释放后自动执行，避免触发请求被直接丢弃。
+func (s *Service) enqueueRunRetry(task *domain.StrmTask, runMode, msg string) error {
+	s.mu.Lock()
+	s.pendingRun[task.ID] = runMode
+	s.dirtyAccounts[task.AccountID] = true
+	s.mu.Unlock()
+	s.log.Info("STRM 任务已加入互斥重试队列",
+		"task_id", task.ID,
+		"task_name", task.Name,
+		"account_id", task.AccountID,
+	)
+	return domain.Errorf(domain.CodeValidation, "%s", msg)
 }
 
 func (s *Service) OnFileMutated(ctx context.Context, e eventbus.FileMutated) {

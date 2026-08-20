@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,6 +48,63 @@ func (r reciprocalRetentionBusy) GetRunningAccountIDs() []int64 {
 		_ = r.other.GetRunningAccountIDs()
 	}
 	return []int64{7}
+}
+
+type constBusy struct{ ids []int64 }
+
+func (c constBusy) GetRunningAccountIDs() []int64 { return c.ids }
+
+func TestRunTaskNowEnqueuesWhenBusy(t *testing.T) {
+	cases := []struct {
+		name    string
+		setBusy func(svc *Service, accID int64)
+		wantMsg string
+	}{
+		{"retention", func(svc *Service, accID int64) { svc.SetRetentionBusyChecker(constBusy{ids: []int64{accID}}) }, "缓存保持"},
+		{"organize", func(svc *Service, accID int64) { svc.SetOrganizeBusyChecker(constBusy{ids: []int64{accID}}) }, "媒体整理"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			svc, st := testService(t)
+			ctx := context.Background()
+			accID, err := st.Accounts.Create(ctx, &domain.Account{Name: "acc", DriverType: "localfs", IsActive: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			task := &domain.StrmTask{Name: "t", AccountID: accID, Path: "/dir", Recursive: true}
+			id, err := st.StrmTasks.Create(ctx, task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.setBusy(svc, accID)
+			got, err := svc.RunTaskNow(ctx, id, domain.StrmRunModeAuto)
+			if err == nil || !strings.Contains(err.Error(), c.wantMsg) || !strings.Contains(err.Error(), "已加入队列") {
+				t.Fatalf("err = %v，期望包含 %q 与 '已加入队列'", err, c.wantMsg)
+			}
+			if got != nil {
+				t.Fatalf("期望返回 nil 任务，实际 %+v", got)
+			}
+			svc.mu.Lock()
+			defer svc.mu.Unlock()
+			if svc.pendingRun[id] != domain.StrmRunModeAuto {
+				t.Fatalf("pendingRun 未设置")
+			}
+			if !svc.dirtyAccounts[accID] {
+				t.Fatalf("dirtyAccounts 未设置")
+			}
+		})
+	}
+}
+
+func TestShouldRunTriggersPendingRun(t *testing.T) {
+	svc, _ := testService(t)
+	svc.mu.Lock()
+	svc.pendingRun[1] = domain.StrmRunModeAuto
+	svc.mu.Unlock()
+	task := &domain.StrmTask{ID: 1, AccountID: 1}
+	if !svc.shouldRun(task, time.Now()) {
+		t.Fatal("存在待执行请求且无互斥时应触发执行")
+	}
 }
 
 func TestShouldRunCrossBusyCheckNoDeadlock(t *testing.T) {

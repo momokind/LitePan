@@ -68,6 +68,11 @@ func (s *Service) shouldRun(task *domain.StrmTask, now time.Time) bool {
 		delete(s.dirtyAccounts, task.AccountID)
 		return true
 	}
+	if mode := s.pendingRun[task.ID]; mode != "" {
+		// 存在待执行请求（互斥排队/启动退避排队）：互斥已释放时立即执行，
+		// 标记由 runTaskAsync 在真正开始执行后消费，避免重复触发。
+		return true
+	}
 	interval := s.effectiveScanIntervalMinutes(task)
 	if task.LastScan.IsZero() {
 		return true
@@ -105,6 +110,8 @@ func (s *Service) runTaskAsync(task *domain.StrmTask) {
 	if runMode == "" {
 		runMode = domain.StrmRunModeAuto
 	}
+	// 真正开始执行前消费待执行标记，避免 30s 调度周期重复触发。
+	delete(s.pendingRun, task.ID)
 	s.mu.Unlock()
 	s.log.Info("strm 任务开始执行",
 		"task_id", task.ID,
