@@ -17,6 +17,7 @@ import (
 	"litepan/internal/driver"
 	"litepan/internal/embyproxy"
 	"litepan/internal/eventbus"
+	"litepan/internal/eventmonitor"
 	"litepan/internal/file"
 	"litepan/internal/fnosproxy"
 	"litepan/internal/fusemount"
@@ -54,6 +55,7 @@ type App struct {
 	cacheRetention   *cacheretention.Service
 	embyProxy        *embyproxy.Service
 	fnosProxy        *fnosproxy.Service
+	eventMonitor     *eventmonitor.Service
 	httpSrv          *http.Server
 	httpBaseCancel   context.CancelFunc
 }
@@ -124,6 +126,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		cacheRetention:   svc.cacheRetention,
 		embyProxy:        svc.embyProxy,
 		fnosProxy:        svc.fnosProxy,
+		eventMonitor:     svc.eventMonitor,
 		httpSrv:          httpSrv,
 		httpBaseCancel:   httpBaseCancel,
 	}, nil
@@ -160,6 +163,9 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.fnosProxy != nil {
 		a.fnosProxy.Start(ctx)
+	}
+	if a.eventMonitor != nil {
+		a.eventMonitor.Start(ctx)
 	}
 	errCh := make(chan error, 1)
 	go func() {

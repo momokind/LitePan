@@ -71,6 +71,8 @@ func (d *Driver) Init(ctx context.Context) error {
 	if err := d.ensureUserInfo(ctx); err != nil {
 		return err
 	}
+	// 确保 115 生活事件收集开启（best-effort，失败不阻塞初始化）。
+	_ = d.enableLifeEvents(ctx)
 	return d.Ping(ctx)
 }
 
@@ -196,4 +198,5 @@ var (
 	_ driver.OfflineURLDownloader     = (*Driver)(nil)
 	_ driver.OfflineTaskRefresher     = (*Driver)(nil)
 	_ driver.OfflineTaskDeleter       = (*Driver)(nil)
+	_ driver.OperationEventProvider   = (*Driver)(nil)
 )

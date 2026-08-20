@@ -53,6 +53,11 @@ const (
 	KeyQuarkTVEnabled              = "quark_tv_enabled"
 	KeyStrmScrapeWriteMode         = "strm_scrape_write_mode"
 
+	KeyEventSyncEnabled           = "event_sync_enabled"
+	KeyEventSyncListenerAccountID = "event_sync_listener_account_id"
+	KeyEventSyncPollIntervalSec   = "event_sync_poll_interval_sec"
+	KeyEventSyncCooldownMin       = "event_sync_cooldown_min"
+
 	KeyMOProxyEnabled          = "mo_proxy_enabled"
 	KeyMOProxyURL              = "mo_proxy_url"
 	KeyMOProxyUsername         = "mo_proxy_username"
@@ -256,6 +261,34 @@ func defaultSpecs() []Spec {
 			Key:     KeyQuarkTVEnabled,
 			Type:    TypeBool,
 			Default: "false",
+			Hidden:  true,
+		},
+		{
+			Key:     KeyEventSyncEnabled,
+			Type:    TypeBool,
+			Default: "false",
+			Hidden:  true,
+		},
+		{
+			Key:     KeyEventSyncListenerAccountID,
+			Type:    TypeString,
+			Default: "",
+			Hidden:  true,
+		},
+		{
+			Key:     KeyEventSyncPollIntervalSec,
+			Type:    TypeInt,
+			Default: "60",
+			Min:     intp(30),
+			Max:     intp(600),
+			Hidden:  true,
+		},
+		{
+			Key:     KeyEventSyncCooldownMin,
+			Type:    TypeInt,
+			Default: "2",
+			Min:     intp(1),
+			Max:     intp(60),
 			Hidden:  true,
 		},
 	}

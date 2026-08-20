@@ -12,6 +12,7 @@ import (
 	"litepan/internal/crosstransfer"
 	"litepan/internal/domain"
 	"litepan/internal/embyproxy"
+	"litepan/internal/eventmonitor"
 	"litepan/internal/favorites"
 	"litepan/internal/file"
 	"litepan/internal/fnosproxy"
@@ -48,6 +49,7 @@ type servicesBundle struct {
 	fnosProxy        *fnosproxy.Service
 	favorites        *favorites.Service
 	quarktv          *quarktv.Service
+	eventMonitor     *eventmonitor.Service
 }
 
 func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *coreBundle) *servicesBundle {
@@ -72,6 +74,17 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	strmSvc.SetRetentionBusyChecker(retentionSvc)
 	retentionSvc.SetStrmBusyChecker(strmSvc)
 	retentionSvc.SetOrganizeBusyChecker(mediaOrganizeSvc)
+	eventMonitorSvc := eventmonitor.NewService(eventmonitor.Options{
+		Accounts:  st.store.Accounts,
+		Cursors:   st.store.EventMonitorCursors,
+		StrmTasks: st.store.StrmTasks,
+		Drivers:   core.drivers,
+		Files:     fileSvc,
+		Strm:      strmSvc,
+		Cache:     core.cache,
+		Settings:  st.settings,
+		Log:       logs.For(logx.ModuleSystem),
+	})
 	fuseReadCache := wireFuseReadCacheOrNil(context.Background(), cfg, logs, st, core.bus)
 	offlineDownloadSvc := offlinedownload.New(offlinedownload.Options{
 		Exec:     core.exec,
@@ -129,6 +142,7 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	})
 	playbackSvc.SetDownloadResolverHook(quarktvSvc.ResolveHook)
 	lifecycle.quarktv = quarktvSvc
+	lifecycle.eventSync = eventMonitorSvc
 	uploadSvc := upload.NewManager(upload.Options{
 		Exec:     core.exec,
 		Files:    fileSvc,
@@ -195,5 +209,6 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		fnosProxy:        fnosProxySvc,
 		favorites:        favoritesSvc,
 		quarktv:          quarktvSvc,
+		eventMonitor:     eventMonitorSvc,
 	}
 }

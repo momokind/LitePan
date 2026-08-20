@@ -28,6 +28,7 @@ import (
 	"litepan/internal/crosstransfer"
 	"litepan/internal/domain"
 	"litepan/internal/embyproxy"
+	"litepan/internal/eventmonitor"
 	"litepan/internal/favorites"
 	"litepan/internal/file"
 	"litepan/internal/fnosproxy"
@@ -74,6 +75,7 @@ type Deps struct {
 	EmbyProxy         *embyproxy.Service
 	FnosProxy         *fnosproxy.Service
 	QuarkTV           *quarktv.Service
+	EventMonitor      *eventmonitor.Service
 	ApiKeys           *apikey.Service
 	Auth              *auth.Service
 	AuthSched         *auth.Scheduler
@@ -109,6 +111,7 @@ type Handler struct {
 	embyProxy         *embyproxy.Service
 	fnosProxy         *fnosproxy.Service
 	quarktv           *quarktv.Service
+	eventMonitor      *eventmonitor.Service
 	apiKeys           *apikey.Service
 	auth              *auth.Service
 	authSched         *auth.Scheduler
@@ -152,6 +155,7 @@ func NewRouter(d Deps) http.Handler {
 		embyProxy:         d.EmbyProxy,
 		fnosProxy:         d.FnosProxy,
 		quarktv:           d.QuarkTV,
+		eventMonitor:      d.EventMonitor,
 		apiKeys:           d.ApiKeys,
 		auth:              d.Auth,
 		authSched:         d.AuthSched,
@@ -304,6 +308,10 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/bind/poll", h.pollQuarkTVBind)
 					r.Put("/binding/settings", h.updateQuarkTVBindingSettings)
 					r.Delete("/bind", h.unbindQuarkTV)
+				})
+				r.Route("/tools/115-event-sync", func(r chi.Router) {
+					r.Get("/status", h.getEventSyncStatus)
+					r.Put("/config", h.putEventSyncConfig)
 				})
 				r.Route("/media-organize", func(r chi.Router) {
 					r.Get("/tasks", h.listMediaOrganizeTasks)

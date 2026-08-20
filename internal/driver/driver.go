@@ -150,6 +150,12 @@ type RequestIntervalConsumer interface {
 	SetRequestIntervalGate(gate RequestIntervalGate)
 }
 
+// OperationEventProvider 可选能力：提供自 fromID 之后的最近操作事件，用于事件监控增量触发。
+// 返回事件切片与新的游标（最新的事件 id）；fromID 为空表示只拉取最近事件并返回游标（供基线初始化）。
+type OperationEventProvider interface {
+	RecentOperations(ctx context.Context, fromID string, limit int) ([]domain.OperationEvent, string, error)
+}
+
 // Driver 最小契约：元信息 + 列目录；其余能力走可选接口。
 type Driver interface {
 	Meta

@@ -46,6 +46,7 @@ type DriverInfo struct {
 	AuthType               string        `json:"auth_type"`
 	SupportsOAuth          bool          `json:"supports_oauth"`
 	SupportsQRLogin        bool          `json:"supports_qr_login"`
+	SupportsEvents         bool          `json:"supports_events"`
 	OAuthName              string        `json:"oauth_name,omitempty"`
 	QRDevices              []FieldOption `json:"qr_devices,omitempty"`
 	QRDeviceField          string        `json:"qr_device_field,omitempty"`
@@ -69,6 +70,7 @@ func Register(c Constructor) {
 	cfg := d.Config()
 	_, supportsOAuth := d.(OAuthConsumer)
 	_, supportsQRLogin := d.(QRLoginProvider)
+	_, supportsEvents := d.(OperationEventProvider)
 	info := DriverInfo{
 		Name:                   cfg.Name,
 		DisplayName:            cfg.DisplayName,
@@ -84,6 +86,7 @@ func Register(c Constructor) {
 		AuthType:               string(cfg.AuthType),
 		SupportsOAuth:          supportsOAuth,
 		SupportsQRLogin:        supportsQRLogin,
+		SupportsEvents:         supportsEvents,
 		OAuthName:              cfg.OAuthName,
 		QRDevices:              append([]FieldOption(nil), cfg.QRDevices...),
 		QRDeviceField:          cfg.QRDeviceField,

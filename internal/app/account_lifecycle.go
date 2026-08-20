@@ -6,6 +6,7 @@ import (
 
 	"litepan/internal/cacheretention"
 	"litepan/internal/domain"
+	"litepan/internal/eventmonitor"
 	"litepan/internal/favorites"
 	"litepan/internal/fusemount"
 	"litepan/internal/fusereadcache"
@@ -27,6 +28,7 @@ type accountLifecycle struct {
 	offline   *offlinedownload.Service
 	uploads   *upload.Manager
 	quarktv   *quarktv.Service
+	eventSync *eventmonitor.Service
 }
 
 func (a accountLifecycle) OnAccountDisabled(ctx context.Context, accountID int64) {
@@ -106,6 +108,9 @@ func (a accountLifecycle) OnAccountDeleted(ctx context.Context, accountID int64)
 		if err := a.quarktv.DeleteBinding(ctx, accountID); err != nil {
 			return fmt.Errorf("清理夸克 TV 绑定失败: %w", err)
 		}
+	}
+	if a.eventSync != nil {
+		a.eventSync.CleanupAccount(ctx, accountID)
 	}
 	return nil
 }
