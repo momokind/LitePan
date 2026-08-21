@@ -215,7 +215,10 @@ func (s *Service) matchAndTrigger(ctx context.Context, events []domain.Operation
 		return
 	}
 	parentIDs := uniqueParentIDs(events)
-	if len(parentIDs) == 0 {
+	// 115 的删除事件 parent_id=0（不带原目录），无法按作用域定位；
+	// 本轮事件含删除时改为触发全部候选任务做对账重扫，由扫描清理远端已删文件的 strm。
+	scopeUnknown := hasDeleteEvent(events)
+	if len(parentIDs) == 0 && !scopeUnknown {
 		s.log.Debug("事件中无可用的父目录 ID（根目录操作或字段缺失），跳过匹配", "events", len(events))
 		return
 	}
@@ -281,7 +284,7 @@ func (s *Service) matchAndTrigger(ctx context.Context, events []domain.Operation
 	var triggeredNames []string
 	for accountID, g := range groups {
 		resolved := s.resolvePaths(ctx, accountID, parentIDs)
-		if len(resolved) == 0 {
+		if len(resolved) == 0 && !scopeUnknown {
 			s.log.Debug("事件目录路径反查全部失败（监听账号与该 STRM 账号可能不是同一 115 空间）",
 				"account_id", accountID, "dir_ids", summarizeIDs(parentIDs))
 			continue
@@ -296,7 +299,7 @@ func (s *Service) matchAndTrigger(ctx context.Context, events []domain.Operation
 					unmatchedPaths = append(unmatchedPaths, path)
 				}
 			}
-			if len(matched) == 0 {
+			if len(matched) == 0 && !scopeUnknown {
 				s.log.Debug("事件目录未命中任务扫描作用域",
 					"task_id", t.ID, "task", t.Name,
 					"task_path", t.Path, "recursive", t.Recursive,
@@ -307,6 +310,10 @@ func (s *Service) matchAndTrigger(ctx context.Context, events []domain.Operation
 				s.log.Debug("事件同步触发冷却中，本次跳过",
 					"task_id", t.ID, "task", t.Name, "cooldown", cooldown.String())
 				continue
+			}
+			if scopeUnknown {
+				// 删除无法定位目录：失效该账号全部目录缓存，让对账重扫读到最新清单。
+				cache.InvalidateAccountDirs(s.cache, accountID)
 			}
 			// 失效该账号受影响目录缓存，确保重扫读取最新变更。
 			for _, parentID := range matched {
@@ -322,7 +329,8 @@ func (s *Service) matchAndTrigger(ctx context.Context, events []domain.Operation
 				}
 				continue
 			}
-			s.log.Info("事件同步触发 STRM 任务", "task_id", t.ID, "task", t.Name, "dirs", len(matched))
+			s.log.Info("事件同步触发 STRM 任务",
+				"task_id", t.ID, "task", t.Name, "dirs", len(matched), "scope_unknown", scopeUnknown)
 			triggeredNames = append(triggeredNames, t.Name)
 		}
 	}
@@ -396,6 +404,17 @@ func summarizeIDs(items []string) string {
 		return strings.Join(items, ",")
 	}
 	return strings.Join(items[:max], ",") + fmt.Sprintf("…等%d项", len(items))
+}
+
+// hasDeleteEvent 报告事件批次中是否含删除。
+// 115 的删除事件 parent_id=0（不带原目录），无法按作用域定位，需全任务对账清理。
+func hasDeleteEvent(events []domain.OperationEvent) bool {
+	for _, e := range events {
+		if e.Type == domain.OperationEventDelete {
+			return true
+		}
+	}
+	return false
 }
 
 // uniqueParentIDs 收集事件中出现的唯一非空父目录 id。

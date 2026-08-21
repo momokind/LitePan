@@ -55,6 +55,15 @@ func InvalidateDirKeys(c *Service, accountID int64, parentID string) {
 	}
 }
 
+// InvalidateAccountDirs 失效某账号全部目录列表缓存。
+// 用于无法定位具体目录的场景（如 115 删除事件不带原目录），重扫前全量失效确保读到最新清单。
+func InvalidateAccountDirs(c *Service, accountID int64) {
+	if c == nil {
+		return
+	}
+	c.InvalidatePrefix(prefixDir + sep + strconv.FormatInt(accountID, 10) + sep)
+}
+
 // FileInfoKey 单文件详情缓存键。
 func FileInfoKey(accountID int64, fileID string) string {
 	return prefixFileInfo + sep + strconv.FormatInt(accountID, 10) + sep + fileID
