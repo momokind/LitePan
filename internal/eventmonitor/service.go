@@ -2,6 +2,7 @@ package eventmonitor
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strconv"
@@ -77,19 +78,19 @@ func NewService(opts Options) *Service {
 		log = slog.Default()
 	}
 	return &Service{
-		accounts:       opts.Accounts,
-		cursors:        opts.Cursors,
-		strmTasks:      opts.StrmTasks,
-		drivers:        opts.Drivers,
-		files:          opts.Files,
-		strm:           opts.Strm,
-		cache:          opts.Cache,
-		settings:       opts.Settings,
-		log:            log,
-		lastTrigger:    make(map[int64]time.Time),
-		backoffUntil:   make(map[int64]time.Time),
-		recalc:         make(chan struct{}, 1),
-		pathCache:      newPathCache(time.Minute),
+		accounts:     opts.Accounts,
+		cursors:      opts.Cursors,
+		strmTasks:    opts.StrmTasks,
+		drivers:      opts.Drivers,
+		files:        opts.Files,
+		strm:         opts.Strm,
+		cache:        opts.Cache,
+		settings:     opts.Settings,
+		log:          log,
+		lastTrigger:  make(map[int64]time.Time),
+		backoffUntil: make(map[int64]time.Time),
+		recalc:       make(chan struct{}, 1),
+		pathCache:    newPathCache(time.Minute),
 	}
 }
 
@@ -143,9 +144,11 @@ func (s *Service) TriggerRecalculation() {
 func (s *Service) pollOnce(ctx context.Context) {
 	accountID := s.listenerAccountID()
 	if accountID <= 0 {
+		s.log.Debug("事件同步已启用但未配置监听账号，跳过轮询")
 		return
 	}
 	if !s.listenerSupportsEvents(ctx, accountID) {
+		s.log.Debug("事件同步监听账号停用或驱动不支持事件，跳过轮询", "account_id", accountID)
 		return
 	}
 	s.pollAccount(ctx, accountID)
@@ -185,6 +188,7 @@ func (s *Service) pollAccount(ctx context.Context, accountID int64) {
 		// 基线初始化：只建立游标，不回放历史事件。
 		if next != "" {
 			s.upsertCursor(ctx, accountID, next)
+			s.log.Debug("事件同步基线初始化完成，历史事件不回放", "account_id", accountID, "cursor", next)
 		}
 		return
 	}
@@ -195,16 +199,24 @@ func (s *Service) pollAccount(ctx context.Context, accountID int64) {
 		return
 	}
 	s.recordPoll(events)
+	s.log.Debug("事件同步收到新事件", "account_id", accountID, "events", len(events), "cursor", next)
+	for _, e := range events {
+		s.log.Debug("事件同步事件明细",
+			"type", e.Type, "file", e.FileName, "file_id", e.FileID,
+			"parent_id", e.ParentID, "is_dir", e.IsDir)
+	}
 	s.matchAndTrigger(ctx, events)
 }
 
 // matchAndTrigger 把事件目录解析为路径，匹配 115 Open STRM 任务并触发同步。
 func (s *Service) matchAndTrigger(ctx context.Context, events []domain.OperationEvent) {
 	if s.strm == nil || s.files == nil || s.strmTasks == nil {
+		s.log.Debug("事件同步依赖服务未就绪，跳过事件匹配")
 		return
 	}
 	parentIDs := uniqueParentIDs(events)
 	if len(parentIDs) == 0 {
+		s.log.Debug("事件中无可用的父目录 ID（根目录操作或字段缺失），跳过匹配", "events", len(events))
 		return
 	}
 
@@ -229,13 +241,22 @@ func (s *Service) matchAndTrigger(ctx context.Context, events []domain.Operation
 	type group struct {
 		tasks []*domain.StrmTask
 	}
+	var skippedPaused, skippedInactive, skippedDriver int
 	groups := make(map[int64]*group)
 	for _, t := range tasks {
 		if t == nil || t.Status == domain.StrmStatusPaused {
+			if t != nil {
+				skippedPaused++
+			}
 			continue
 		}
 		acc := accByID[t.AccountID]
-		if acc == nil || !acc.IsActive || acc.DriverType != targetDriverType {
+		if acc == nil || !acc.IsActive {
+			skippedInactive++
+			continue
+		}
+		if acc.DriverType != targetDriverType {
+			skippedDriver++
 			continue
 		}
 		g := groups[t.AccountID]
@@ -246,6 +267,12 @@ func (s *Service) matchAndTrigger(ctx context.Context, events []domain.Operation
 		g.tasks = append(g.tasks, t)
 	}
 	if len(groups) == 0 {
+		s.log.Debug("事件同步无候选 STRM 任务",
+			"tasks", len(tasks),
+			"paused", skippedPaused,
+			"account_inactive", skippedInactive,
+			"not_115_open", skippedDriver,
+			"hint", "事件同步只触发 115 Open 账号下的任务")
 		return
 	}
 
@@ -255,19 +282,30 @@ func (s *Service) matchAndTrigger(ctx context.Context, events []domain.Operation
 	for accountID, g := range groups {
 		resolved := s.resolvePaths(ctx, accountID, parentIDs)
 		if len(resolved) == 0 {
+			s.log.Debug("事件目录路径反查全部失败（监听账号与该 STRM 账号可能不是同一 115 空间）",
+				"account_id", accountID, "dir_ids", summarizeIDs(parentIDs))
 			continue
 		}
 		for _, t := range g.tasks {
 			var matched []string
+			var unmatchedPaths []string
 			for parentID, path := range resolved {
 				if matchTaskScope(path, t) {
 					matched = append(matched, parentID)
+				} else {
+					unmatchedPaths = append(unmatchedPaths, path)
 				}
 			}
 			if len(matched) == 0 {
+				s.log.Debug("事件目录未命中任务扫描作用域",
+					"task_id", t.ID, "task", t.Name,
+					"task_path", t.Path, "recursive", t.Recursive,
+					"event_dirs", summarizeIDs(unmatchedPaths))
 				continue
 			}
 			if !s.acquireTrigger(t.ID, cooldown, now) {
+				s.log.Debug("事件同步触发冷却中，本次跳过",
+					"task_id", t.ID, "task", t.Name, "cooldown", cooldown.String())
 				continue
 			}
 			// 失效该账号受影响目录缓存，确保重扫读取最新变更。
@@ -275,7 +313,13 @@ func (s *Service) matchAndTrigger(ctx context.Context, events []domain.Operation
 				cache.InvalidateDirKeys(s.cache, accountID, parentID)
 			}
 			if _, err := s.strm.RunTaskNow(ctx, t.ID, domain.StrmRunModeAuto); err != nil {
-				s.log.Warn("事件同步触发 STRM 任务失败", "task_id", t.ID, "task", t.Name, "err", err)
+				// 账号互斥/启动退避期间 RunTaskNow 返回 Validation 错误但已入延迟执行队列，属正常排队。
+				if ae, ok := domain.AsAppError(err); ok && ae.Code == domain.CodeValidation {
+					s.log.Info("事件同步触发已进入执行队列，稍后自动执行",
+						"task_id", t.ID, "task", t.Name, "msg", ae.Message)
+				} else {
+					s.log.Warn("事件同步触发 STRM 任务失败", "task_id", t.ID, "task", t.Name, "err", err)
+				}
 				continue
 			}
 			s.log.Info("事件同步触发 STRM 任务", "task_id", t.ID, "task", t.Name, "dirs", len(matched))
@@ -315,6 +359,7 @@ func (s *Service) resolvePaths(ctx context.Context, accountID int64, parentIDs [
 		}
 		p, err := s.files.ResolveDirPath(ctx, accountID, pid)
 		if err != nil {
+			s.log.Debug("事件目录路径反查失败", "account_id", accountID, "dir_id", pid, "err", err)
 			s.pathCache.set(accountID, pid, "", false)
 			continue
 		}
@@ -342,6 +387,15 @@ func matchTaskScope(path string, t *domain.StrmTask) bool {
 		return false
 	}
 	return strings.HasPrefix(path, base+"/")
+}
+
+// summarizeIDs 汇总目录 ID/路径列表用于日志输出，最多展示 10 项，超出部分以计数提示。
+func summarizeIDs(items []string) string {
+	const max = 10
+	if len(items) <= max {
+		return strings.Join(items, ",")
+	}
+	return strings.Join(items[:max], ",") + fmt.Sprintf("…等%d项", len(items))
 }
 
 // uniqueParentIDs 收集事件中出现的唯一非空父目录 id。
