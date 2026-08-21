@@ -191,6 +191,14 @@ func ScanTask(ctx context.Context, task *domain.StrmTask, deps ScanDeps, runMode
 		}
 	}
 
+	// 本轮扫描成功走完各分支：为临时分支续期。否则活跃分支 30 天后过期删除，
+	// 对应目录会因"本地已有嵌套 strm"被跳过（跳过判断先于重新注册），从此失联。
+	if useBranch && deps.Branches != nil {
+		if err := deps.Branches.RenewTemporaryExpiry(ctx, task.ID); err != nil {
+			log.Warn("strm 临时分支续期失败", "task_id", task.ID, "err", err)
+		}
+	}
+
 	return finalizeScan(ctx, task, deps, scanHarvest{
 		candidates:      candidates,
 		metadataItems:   metadataItems,
@@ -473,6 +481,29 @@ func shouldAutoAddTemporaryBranch(ctx context.Context, deps ScanDeps, task *doma
 	return false
 }
 
+// createTemporaryBranch 把子目录注册为 30 天临时分支；成功返回 true。
+// 调用方负责判重（已知分支或本轮已处理）；Create 失败按幂等忽略，下一轮扫描重试。
+func createTemporaryBranch(ctx context.Context, deps ScanDeps, task *domain.StrmTask, folderID, remotePath string, relDirs []string) bool {
+	if deps.Branches == nil {
+		return false
+	}
+	branch := &domain.StrmBranch{
+		TaskID:        task.ID,
+		AccountID:     task.AccountID,
+		ParentID:      folderID,
+		Path:          remotePath,
+		RelativePath:  strings.Join(relDirs, "/"),
+		Recursive:     true,
+		RetentionDays: 30,
+		ExpiresAt:     time.Now().Add(30 * 24 * time.Hour),
+		BranchType:    domain.StrmBranchTypeTemporary,
+		Source:        "auto",
+		Status:        "running",
+	}
+	_, err := deps.Branches.Create(ctx, branch)
+	return err == nil
+}
+
 // looksLikeNotFound 判断错误是否可视为“目录/对象不存在”。
 func looksLikeNotFound(err error) bool {
 	if err == nil {
@@ -563,39 +594,31 @@ func walkBaseBranchEntry(
 				continue
 			}
 			childRel := append(append([]string{}, relDirs...), name)
+			childRemote := joinRemotePath(scope.remotePath, name)
 			if _, ok := localStrmChildren[SafeName(name)]; ok {
 				skippedDirs[dirKey(childRel)] = struct{}{}
 				markSubtreeMedia(subtreeHasMedia, childRel)
+				// 本地已有嵌套 strm ⇒ 含子目录的媒体子树。补注册为临时分支，
+				// 使其下一轮作为分支持续重扫；否则该目录（如过期被清理的分支）
+				// 会被永久跳过，其新增/删除不再同步。
+				if createTemporaryBranch(ctx, deps, task, childID, childRemote, childRel) {
+					if log != nil {
+						log.Info("strm re-register skipped dir as temporary branch", "path", childRemote)
+					}
+				}
 				continue
 			}
-			childRemote := joinRemotePath(scope.remotePath, name)
 			childScope := scanScope{
 				parentID:   childID,
 				relDirs:    childRel,
 				recursive:  true,
 				remotePath: childRemote,
 			}
-			if deps.Branches != nil && shouldAutoAddTemporaryBranch(ctx, deps, task, childID, exts) {
-				relativePath := strings.Join(childRel, "/")
-				expiresAt := time.Now().Add(30 * 24 * time.Hour)
-				branch := &domain.StrmBranch{
-					TaskID:        task.ID,
-					AccountID:     task.AccountID,
-					ParentID:      childID,
-					Path:          childRemote,
-					RelativePath:  relativePath,
-					Recursive:     true,
-					RetentionDays: 30,
-					ExpiresAt:     expiresAt,
-					BranchType:    domain.StrmBranchTypeTemporary,
-					Source:        "auto",
-					Status:        "running",
-				}
-				if _, createErr := deps.Branches.Create(ctx, branch); createErr == nil {
-					branchParentIDs[childID] = struct{}{}
-					if log != nil {
-						log.Info("strm auto temporary branch", "path", childRemote)
-					}
+			if deps.Branches != nil && shouldAutoAddTemporaryBranch(ctx, deps, task, childID, exts) &&
+				createTemporaryBranch(ctx, deps, task, childID, childRemote, childRel) {
+				branchParentIDs[childID] = struct{}{}
+				if log != nil {
+					log.Info("strm auto temporary branch", "path", childRemote)
 				}
 			}
 			childScopes = append(childScopes, childScope)

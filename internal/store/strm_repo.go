@@ -218,6 +218,21 @@ func (r *strmBranchRepo) DeleteExpired(ctx context.Context, taskID int64) (int, 
 	return int(n), nil
 }
 
+// RenewTemporaryExpiry 为任务下全部设保留天数的临时分支续期（expires_at = 当前时间 + retention_days）。
+// 临时分支过期删除后，对应目录会因"本地已有嵌套 strm"被分支扫描跳过且不再自动注册；
+// 每轮扫描成功后续期可保证活跃分支不过期。保留天数为 0（永久）的分支无过期时间，不受影响。
+func (r *strmBranchRepo) RenewTemporaryExpiry(ctx context.Context, taskID int64) error {
+	_, err := r.db.write.ExecContext(ctx,
+		`UPDATE strm_branches
+		   SET expires_at = datetime('now', '+' || retention_days || ' days'), updated_at = CURRENT_TIMESTAMP
+		 WHERE task_id=? AND branch_type=? AND retention_days > 0`,
+		taskID, domain.StrmBranchTypeTemporary)
+	if err != nil {
+		return wrapDB(err)
+	}
+	return nil
+}
+
 const selectStrmBranchCols = `SELECT id,task_id,account_id,parent_id,path,relative_path,recursive,retention_days,expires_at,branch_type,status,source,created_at,updated_at
 FROM strm_branches`
 

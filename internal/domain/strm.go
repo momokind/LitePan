@@ -125,4 +125,7 @@ type StrmBranchRepository interface {
 	Get(ctx context.Context, id int64) (*StrmBranch, error)
 	ListByTask(ctx context.Context, taskID int64) ([]*StrmBranch, error)
 	DeleteExpired(ctx context.Context, taskID int64) (int, error)
+	// RenewTemporaryExpiry 为任务下设保留天数的临时分支续期：
+	// 活跃扫描的分支不应过期，否则删除后对应目录会因"本地已有嵌套 strm"被永久跳过。
+	RenewTemporaryExpiry(ctx context.Context, taskID int64) error
 }
