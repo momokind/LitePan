@@ -3,6 +3,7 @@ package pan115
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -65,8 +66,9 @@ func mapBehaviorType(t int) (string, bool) {
 }
 
 // isFolderBehavior 报告事件对象是否为目录（仅事件类型能确定的目录类事件）。
+// 20 是 folder_rename：目录改名事件需要上层按目录处理（作用域按旧路径配置，无法按新路径匹配）。
 func isFolderBehavior(t int) bool {
-	return t == 17 || t == 18
+	return t == 17 || t == 18 || t == 20
 }
 
 // eventIDValue 把事件 id 字符串解析为数值，用于游标比较；非法返回 0。
@@ -133,8 +135,10 @@ func (d *Driver) RecentOperations(ctx context.Context, fromID string, limit int)
 	baseline := fromVal == 0
 
 	var events []domain.OperationEvent
+	// 按事件 id 去重（offset 翻页重叠或同文件多条事件不去重会导致重复触发）。
 	seen := make(map[string]struct{})
 	var maxID int64
+	reachedFrom := false
 
 	offset := 0
 	for {
@@ -146,19 +150,19 @@ func (d *Driver) RecentOperations(ctx context.Context, fromID string, limit int)
 		if len(items) == 0 {
 			break
 		}
-		stop := false
 		for _, it := range items {
 			idv := eventIDValue(it.ID)
 			if idv > maxID {
 				maxID = idv
 			}
 			if baseline {
-				stop = true
-				break
+				continue // 基线初始化：只统计最大事件 id，不回放历史事件。
 			}
 			if fromVal > 0 && idv <= fromVal {
-				stop = true
-				break
+				// 已追平游标。列表若非严格按 id 逆序，同页后续仍可能混有新事件，
+				// 因此不在页内提前中断，整页过滤完后停止翻页。
+				reachedFrom = true
+				continue
 			}
 			typ, ok := mapBehaviorType(it.Type)
 			if !ok {
@@ -168,12 +172,16 @@ func (d *Driver) RecentOperations(ctx context.Context, fromID string, limit int)
 			if fid == "" {
 				continue
 			}
-			if _, dup := seen[fid]; dup {
+			eid := strings.TrimSpace(it.ID)
+			if eid == "" {
 				continue
 			}
-			seen[fid] = struct{}{}
+			if _, dup := seen[eid]; dup {
+				continue
+			}
+			seen[eid] = struct{}{}
 			events = append(events, domain.OperationEvent{
-				ID:       it.ID,
+				ID:       eid,
 				Type:     typ,
 				FileID:   fid,
 				ParentID: strings.TrimSpace(it.ParentID),
@@ -183,11 +191,14 @@ func (d *Driver) RecentOperations(ctx context.Context, fromID string, limit int)
 				Time:     time.Unix(it.UpdateTime, 0),
 			})
 		}
-		if baseline || stop || !page.Data.NextPage {
+		if baseline || reachedFrom || !page.Data.NextPage {
 			break
 		}
 		offset += len(items)
 		if offset >= 10000 {
+			// 积压超过 1 万条：放弃更早的事件（游标仍前移到最新），至少记录告警避免静默丢失。
+			slog.Warn("115 事件积压超过扫描上限，较早事件将被跳过",
+				"scanned", offset, "latest_event_id", maxID)
 			break
 		}
 	}

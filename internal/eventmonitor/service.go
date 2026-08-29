@@ -20,10 +20,11 @@ import (
 
 // 启动退避与轮询配置。
 const (
-	startupDelay     = 30 * time.Second
-	defaultPollSec   = 60
-	defaultCooldown  = 2 * time.Minute
-	transientBackoff = 5 * time.Minute
+	startupDelay    = 30 * time.Second
+	defaultPollSec  = 60
+	defaultCooldown = 2 * time.Minute
+	backoffBase     = time.Minute // 瞬态错误退避基数，按连续失败次数翻倍
+	backoffMax      = 30 * time.Minute
 	// eventPollExtraMS 与 115 驱动默认 800ms 闸门叠加，强制事件接口两次调用 ≥5s。
 	eventPollExtraMS = 4200
 	// targetDriverType 是事件可作用于的 STRM 任务所属驱动类型：115 Open。
@@ -58,7 +59,8 @@ type Service struct {
 
 	mu             sync.Mutex
 	lastTrigger    map[int64]time.Time // 任务级冷却：最近触发时间
-	backoffUntil   map[int64]time.Time // 监听账号级退避
+	backoff        map[int64]backoffState
+	pending        map[int64]*pendingTrigger
 	triggerCount   int64
 	lastPollAt     time.Time
 	lastEvents     int
@@ -71,6 +73,21 @@ type Service struct {
 	pathCache *pathCache
 }
 
+// pendingTrigger 是冷却期内被合并跳过的待补触发记录：冷却到期后由轮询循环补触发一次，
+// 保证冷却期间到达的事件（游标已前移、不会重放）不丢失。
+type pendingTrigger struct {
+	accountID         int64
+	readyAt           time.Time
+	dirIDs            map[string]struct{}
+	invalidateAccount bool
+}
+
+// backoffState 是监听账号级的瞬态错误退避：连续失败按指数递增，成功后清零。
+type backoffState struct {
+	until    time.Time
+	failures int
+}
+
 // NewService 构造事件同步服务。
 func NewService(opts Options) *Service {
 	log := opts.Log
@@ -78,19 +95,20 @@ func NewService(opts Options) *Service {
 		log = slog.Default()
 	}
 	return &Service{
-		accounts:     opts.Accounts,
-		cursors:      opts.Cursors,
-		strmTasks:    opts.StrmTasks,
-		drivers:      opts.Drivers,
-		files:        opts.Files,
-		strm:         opts.Strm,
-		cache:        opts.Cache,
-		settings:     opts.Settings,
-		log:          log,
-		lastTrigger:  make(map[int64]time.Time),
-		backoffUntil: make(map[int64]time.Time),
-		recalc:       make(chan struct{}, 1),
-		pathCache:    newPathCache(time.Minute),
+		accounts:    opts.Accounts,
+		cursors:     opts.Cursors,
+		strmTasks:   opts.StrmTasks,
+		drivers:     opts.Drivers,
+		files:       opts.Files,
+		strm:        opts.Strm,
+		cache:       opts.Cache,
+		settings:    opts.Settings,
+		log:         log,
+		lastTrigger: make(map[int64]time.Time),
+		backoff:     make(map[int64]backoffState),
+		pending:     make(map[int64]*pendingTrigger),
+		recalc:      make(chan struct{}, 1),
+		pathCache:   newPathCache(time.Minute),
 	}
 }
 
@@ -128,6 +146,7 @@ func (s *Service) loop(ctx context.Context) {
 				continue
 			}
 			s.pollOnce(ctx)
+			s.processPendingTriggers(ctx)
 		}
 	}
 }
@@ -192,9 +211,6 @@ func (s *Service) pollAccount(ctx context.Context, accountID int64) {
 		}
 		return
 	}
-	if next != "" && next != fromID {
-		s.upsertCursor(ctx, accountID, next)
-	}
 	if len(events) == 0 {
 		return
 	}
@@ -206,6 +222,10 @@ func (s *Service) pollAccount(ctx context.Context, accountID int64) {
 			"parent_id", e.ParentID, "is_dir", e.IsDir)
 	}
 	s.matchAndTrigger(ctx, events)
+	// 游标在事件处理完成后保存：进程崩溃时宁可下轮重复触发幂等重扫，也不丢事件。
+	if next != "" && next != fromID {
+		s.upsertCursor(ctx, accountID, next)
+	}
 }
 
 // matchAndTrigger 把事件目录解析为路径，匹配 115 Open STRM 任务并触发同步。
@@ -216,8 +236,9 @@ func (s *Service) matchAndTrigger(ctx context.Context, events []domain.Operation
 	}
 	parentIDs := uniqueParentIDs(events)
 	// 115 的删除事件 parent_id=0（不带原目录），无法按作用域定位；
-	// 本轮事件含删除时改为触发全部候选任务做对账重扫，由扫描清理远端已删文件的 strm。
-	scopeUnknown := hasDeleteEvent(events)
+	// 目录改名后任务作用域仍按旧路径配置，事件只能解析出新路径，同样无法对齐。
+	// 两类事件改为触发全部候选任务做对账重扫，由扫描对齐远端实际清单。
+	scopeUnknown := hasDeleteEvent(events) || hasDirRenameEvent(events)
 	if len(parentIDs) == 0 && !scopeUnknown {
 		s.log.Debug("事件中无可用的父目录 ID（根目录操作或字段缺失），跳过匹配", "events", len(events))
 		return
@@ -306,32 +327,17 @@ func (s *Service) matchAndTrigger(ctx context.Context, events []domain.Operation
 					"event_dirs", summarizeIDs(unmatchedPaths))
 				continue
 			}
-			if !s.acquireTrigger(t.ID, cooldown, now) {
-				s.log.Debug("事件同步触发冷却中，本次跳过",
-					"task_id", t.ID, "task", t.Name, "cooldown", cooldown.String())
+			if ok, readyAt := s.acquireTrigger(t.ID, cooldown, now); !ok {
+				s.deferTrigger(t.ID, accountID, readyAt, matched, scopeUnknown)
+				s.log.Debug("事件同步触发冷却中，已登记冷却结束后补触发",
+					"task_id", t.ID, "task", t.Name, "ready_at", readyAt)
 				continue
 			}
-			if scopeUnknown {
-				// 删除无法定位目录：失效该账号全部目录缓存，让对账重扫读到最新清单。
-				cache.InvalidateAccountDirs(s.cache, accountID)
+			if s.triggerTask(ctx, t, matched, scopeUnknown) {
+				s.log.Info("事件同步触发 STRM 任务",
+					"task_id", t.ID, "task", t.Name, "dirs", len(matched), "scope_unknown", scopeUnknown)
+				triggeredNames = append(triggeredNames, t.Name)
 			}
-			// 失效该账号受影响目录缓存，确保重扫读取最新变更。
-			for _, parentID := range matched {
-				cache.InvalidateDirKeys(s.cache, accountID, parentID)
-			}
-			if _, err := s.strm.RunTaskNow(ctx, t.ID, domain.StrmRunModeAuto); err != nil {
-				// 账号互斥/启动退避期间 RunTaskNow 返回 Validation 错误但已入延迟执行队列，属正常排队。
-				if ae, ok := domain.AsAppError(err); ok && ae.Code == domain.CodeValidation {
-					s.log.Info("事件同步触发已进入执行队列，稍后自动执行",
-						"task_id", t.ID, "task", t.Name, "msg", ae.Message)
-				} else {
-					s.log.Warn("事件同步触发 STRM 任务失败", "task_id", t.ID, "task", t.Name, "err", err)
-				}
-				continue
-			}
-			s.log.Info("事件同步触发 STRM 任务",
-				"task_id", t.ID, "task", t.Name, "dirs", len(matched), "scope_unknown", scopeUnknown)
-			triggeredNames = append(triggeredNames, t.Name)
 		}
 	}
 	if len(triggeredNames) > 0 {
@@ -343,14 +349,108 @@ func (s *Service) matchAndTrigger(ctx context.Context, events []domain.Operation
 }
 
 // acquireTrigger 按任务级冷却决定是否允许触发；允许时记录触发时间。
-func (s *Service) acquireTrigger(taskID int64, cooldown time.Duration, now time.Time) bool {
+// 拒绝时一并返回冷却结束时间，供登记补触发。
+func (s *Service) acquireTrigger(taskID int64, cooldown time.Duration, now time.Time) (bool, time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if last, ok := s.lastTrigger[taskID]; ok && now.Sub(last) < cooldown {
-		return false
+	if last, ok := s.lastTrigger[taskID]; ok {
+		if ready := last.Add(cooldown); now.Before(ready) {
+			return false, ready
+		}
 	}
 	s.lastTrigger[taskID] = now
 	s.triggerCount++
+	return true, now
+}
+
+// deferTrigger 登记冷却结束后的补触发；同任务多个事件合并为一次补触发：
+// 目录失效集合取并集、到期时间取最早者。
+func (s *Service) deferTrigger(taskID, accountID int64, readyAt time.Time, dirIDs []string, invalidateAccount bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.pending[taskID]
+	if p == nil {
+		p = &pendingTrigger{dirIDs: make(map[string]struct{})}
+		s.pending[taskID] = p
+	}
+	p.accountID = accountID
+	if p.readyAt.IsZero() || readyAt.Before(p.readyAt) {
+		p.readyAt = readyAt
+	}
+	if invalidateAccount {
+		p.invalidateAccount = true
+	}
+	for _, id := range dirIDs {
+		p.dirIDs[id] = struct{}{}
+	}
+}
+
+// processPendingTriggers 补触发冷却期内被合并的任务；由轮询循环每个 tick 调用。
+func (s *Service) processPendingTriggers(ctx context.Context) {
+	now := time.Now()
+	type dueEntry struct {
+		id int64
+		p  *pendingTrigger
+	}
+	var due []dueEntry
+	s.mu.Lock()
+	for id, p := range s.pending {
+		if now.Before(p.readyAt) {
+			continue
+		}
+		due = append(due, dueEntry{id: id, p: p})
+		delete(s.pending, id)
+	}
+	s.mu.Unlock()
+	for _, d := range due {
+		s.firePendingTrigger(ctx, d.id, d.p)
+	}
+}
+
+// firePendingTrigger 执行一次补触发；任务已删除/暂停或账号不可用时直接丢弃。
+func (s *Service) firePendingTrigger(ctx context.Context, taskID int64, p *pendingTrigger) {
+	t, err := s.strmTasks.Get(ctx, taskID)
+	if err != nil || t == nil || t.Status == domain.StrmStatusPaused {
+		return
+	}
+	acc, err := s.accounts.Get(ctx, p.accountID)
+	if err != nil || acc == nil || !acc.IsActive || acc.DriverType != targetDriverType {
+		return
+	}
+	if ok, _ := s.acquireTrigger(taskID, s.triggerCooldown(), time.Now()); !ok {
+		// 冷却未到说明期间已被新事件批次触发过，那次扫描已覆盖本次补触发，直接丢弃。
+		s.log.Debug("事件同步补触发冷却未到，跳过", "task_id", taskID)
+		return
+	}
+	dirIDs := make([]string, 0, len(p.dirIDs))
+	for id := range p.dirIDs {
+		dirIDs = append(dirIDs, id)
+	}
+	if s.triggerTask(ctx, t, dirIDs, p.invalidateAccount) {
+		s.log.Info("事件同步冷却结束后补触发 STRM 任务", "task_id", taskID, "task", t.Name, "dirs", len(dirIDs))
+	}
+}
+
+// triggerTask 失效相关目录缓存并触发任务立即扫描；返回是否成功触发。
+func (s *Service) triggerTask(ctx context.Context, t *domain.StrmTask, dirIDs []string, invalidateAccount bool) bool {
+	if invalidateAccount {
+		// 删除无法定位目录：失效该账号全部目录缓存，让对账重扫读到最新清单。
+		cache.InvalidateAccountDirs(s.cache, t.AccountID)
+	}
+	// 失效该账号受影响目录缓存，确保重扫读取最新变更。
+	for _, parentID := range dirIDs {
+		cache.InvalidateDirKeys(s.cache, t.AccountID, parentID)
+	}
+	if _, err := s.strm.RunTaskNow(ctx, t.ID, domain.StrmRunModeAuto); err != nil {
+		// 账号互斥/启动退避期间 RunTaskNow 返回 Validation 错误但已入延迟执行队列，属正常排队。
+		if ae, ok := domain.AsAppError(err); ok && ae.Code == domain.CodeValidation {
+			s.log.Info("事件同步触发已进入执行队列，稍后自动执行",
+				"task_id", t.ID, "task", t.Name, "msg", ae.Message)
+		} else {
+			s.log.Warn("事件同步触发 STRM 任务失败", "task_id", t.ID, "task", t.Name, "err", err)
+		}
+		return false
+	}
 	return true
 }
 
@@ -411,6 +511,17 @@ func summarizeIDs(items []string) string {
 func hasDeleteEvent(events []domain.OperationEvent) bool {
 	for _, e := range events {
 		if e.Type == domain.OperationEventDelete {
+			return true
+		}
+	}
+	return false
+}
+
+// hasDirRenameEvent 报告事件批次中是否含目录改名。
+// 任务作用域按旧路径配置，目录改名后事件只能解析出新路径，需全任务对账。
+func hasDirRenameEvent(events []domain.OperationEvent) bool {
+	for _, e := range events {
+		if e.Type == domain.OperationEventRename && e.IsDir {
 			return true
 		}
 	}
@@ -525,7 +636,12 @@ func (s *Service) SetConfig(ctx context.Context, c Config) error {
 func (s *Service) CleanupAccount(ctx context.Context, accountID int64) {
 	s.mu.Lock()
 	delete(s.lastTrigger, accountID)
-	delete(s.backoffUntil, accountID)
+	delete(s.backoff, accountID)
+	for id, p := range s.pending {
+		if p.accountID == accountID {
+			delete(s.pending, id)
+		}
+	}
 	s.mu.Unlock()
 	s.pathCache.clearAccount(accountID)
 	if s.cursors != nil {
@@ -613,18 +729,29 @@ func (s *Service) triggerCooldown() time.Duration {
 func (s *Service) inBackoff(accountID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return time.Now().Before(s.backoffUntil[accountID])
+	return time.Now().Before(s.backoff[accountID].until)
 }
 
+// setBackoff 按连续失败次数指数递增退避：1min、2min、4min…封顶 30min。
 func (s *Service) setBackoff(accountID int64) {
 	s.mu.Lock()
-	s.backoffUntil[accountID] = time.Now().Add(transientBackoff)
+	st := s.backoff[accountID]
+	if st.failures < 0 || st.failures > 20 {
+		st.failures = 20 // 防移位溢出；此时延迟已封顶。
+	}
+	st.failures++
+	delay := backoffBase << (st.failures - 1)
+	if delay <= 0 || delay > backoffMax {
+		delay = backoffMax
+	}
+	st.until = time.Now().Add(delay)
+	s.backoff[accountID] = st
 	s.mu.Unlock()
 }
 
 func (s *Service) clearBackoff(accountID int64) {
 	s.mu.Lock()
-	delete(s.backoffUntil, accountID)
+	delete(s.backoff, accountID)
 	s.mu.Unlock()
 }
 

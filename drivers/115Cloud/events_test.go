@@ -157,3 +157,80 @@ func TestRecentOperationsBaselineAndCursor(t *testing.T) {
 		t.Errorf("cursor = %q, want 1003", next)
 	}
 }
+
+// 验证：同文件多条事件均保留（按事件 id 去重而非 file_id）；目录改名事件标记 IsDir。
+func TestRecentOperationsSameFileAndDirRename(t *testing.T) {
+	old := behaviorDetailURL
+	defer func() { behaviorDetailURL = old }()
+
+	// id 2002（目录改名 type=20）与 2001（同文件 f1 的上传）均应返回。
+	body := `{"state":true,"data":{"count":2,"next_page":false,"list":[
+		{"id":"2002","type":20,"file_id":"d1","parent_id":"p0","file_name":"新名","update_time":1700000002},
+		{"id":"2001","type":2,"file_id":"f1","parent_id":"p1","file_name":"a.mp4","update_time":1700000001}
+	]}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+	behaviorDetailURL = server.URL + "/behavior/detail"
+
+	d := &Driver{}
+	d.cookie = "UID=1;CID=2;SEID=3"
+	d.client = server.Client()
+
+	events, next, err := d.RecentOperations(context.Background(), "1000", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != "2002" {
+		t.Errorf("cursor = %q, want 2002", next)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events (same file_id must not be deduped), got %d: %+v", len(events), events)
+	}
+	if !events[0].IsDir || events[0].Type != domain.OperationEventRename {
+		t.Errorf("folder rename should be IsDir rename, got %+v", events[0])
+	}
+}
+
+// 验证：事件列表同页内 id 非严格逆序时，游标之后的乱序新事件不被提前中断丢弃。
+func TestRecentOperationsOutOfOrderPage(t *testing.T) {
+	old := behaviorDetailURL
+	defer func() { behaviorDetailURL = old }()
+
+	// 逆序中出现旧事件 999（≤游标 1000）后，同页仍有新事件 1500。
+	body := `{"state":true,"data":{"count":3,"next_page":false,"list":[
+		{"id":"2000","type":2,"file_id":"f1","parent_id":"p1","file_name":"a.mp4","update_time":1700000003},
+		{"id":"999","type":2,"file_id":"f2","parent_id":"p1","file_name":"old.mp4","update_time":1700000001},
+		{"id":"1500","type":2,"file_id":"f3","parent_id":"p1","file_name":"b.mp4","update_time":1700000002}
+	]}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+	behaviorDetailURL = server.URL + "/behavior/detail"
+
+	d := &Driver{}
+	d.cookie = "UID=1;CID=2;SEID=3"
+	d.client = server.Client()
+
+	events, next, err := d.RecentOperations(context.Background(), "1000", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != "2000" {
+		t.Errorf("cursor = %q, want 2000", next)
+	}
+	ids := map[string]bool{}
+	for _, e := range events {
+		ids[e.ID] = true
+	}
+	if !ids["2000"] || !ids["1500"] {
+		t.Fatalf("out-of-order new event 1500 was dropped, got %v", ids)
+	}
+	if ids["999"] {
+		t.Fatal("event at or below cursor should be filtered")
+	}
+}
