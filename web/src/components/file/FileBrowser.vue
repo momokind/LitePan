@@ -14,11 +14,13 @@ import CloudLocalUploadPanel from "@/components/file/CloudLocalUploadPanel.vue";
 import { useOfflineDownloads } from "@/composables/useOfflineDownloads";
 import { toast } from "@/composables/useToast";
 import { filesApi } from "@/api/files";
+import { coverExtractApi } from "@/api/coverExtract";
 import type { Account, BrowserFavoriteItem, FileItem, FileNameAlignPreviewResult } from "@/api/types";
 import type { OfflineDownloadTask } from "@/types/offline-download";
 import { getApiErrorMessage } from "@/api/client";
 import { generateCurrentDirectoryStrm } from "@/api/strm";
 import { useStrmDirectoryPrompt } from "@/composables/useStrmDirectoryPrompt";
+import { useHomeFooterStatus } from "@/composables/useHomeFooterStatus";
 import { fileKind } from "@/utils/fileIcon";
 import { publicApi } from "@/api/public";
 import AccountSelector from "./AccountSelector.vue";
@@ -45,6 +47,7 @@ type FocusableInput = {
 const BROWSER_LOCATION_STORAGE_KEY = "litepan:index:browser-location";
 const BROWSER_LOCATION_RESET_ONCE_KEY = "litepan:index:reset-once";
 const ACCOUNT_SWITCH_MODE_STORAGE_KEY = "litepan:index:account-switch-mode";
+const COMPACT_HOME_STORAGE_KEY = "litepan:index:compact-home-enabled";
 const DRAG_UNLOCK_DURATION_MS = 600;
 
 interface BrowserLocationSnapshot {
@@ -68,6 +71,7 @@ const createFolderRequest = ref(0);
 const uploadFileInput = ref<HTMLInputElement | null>(null);
 const uploadFolderInput = ref<HTMLInputElement | null>(null);
 const accountSwitchMode = ref<"dropdown" | "floating">(readSavedAccountSwitchMode());
+const compactHomeEnabled = ref(localStorage.getItem(COMPACT_HOME_STORAGE_KEY) === "1");
 const favoriteNameModalOpen = ref(false);
 const favoriteNameInput = ref("");
 const favoriteNameInputRef = ref<FocusableInput | null>(null);
@@ -90,6 +94,7 @@ const nameAlignApplyProgress = ref(0);
 const activePreview = ref<ActiveFilePreview | null>(null);
 let nameAlignApplyTimer: number | undefined;
 
+// 悬浮账号列表与简约模式不冲突：简约模式下左侧仍保留悬浮图标，账号下拉选择则不渲染。
 const floatingAccountSwitchEnabled = computed(
   () => accountSwitchMode.value === "floating" && accounts.value.length > 1,
 );
@@ -112,7 +117,7 @@ const sortAccountKey = computed(() =>
   currentAccountId.value != null ? String(currentAccountId.value) : "",
 );
 const { sortKey, sortOrder, sortBy, sortClass } = useFileSort(files, sortAccountKey, filesResortTick);
-const { selectedCount, selectedFiles } = useFileSelection(files, selectedIds);
+const { selectedFiles } = useFileSelection(files, selectedIds);
 
 function getDeleteMode(): DeleteMode {
   const account = accounts.value.find((a) => a.id === currentAccountId.value);
@@ -145,6 +150,23 @@ const fileActions = useFileActions({
   addFolderLocally: (folder) => store.addFolderLocally(folder),
   reloadFiles: (opts) => store.loadFiles({ ...opts, silent: true }),
 });
+
+const coverExtractEnabled = ref(false);
+
+async function sendToCoverExtract(file: FileItem) {
+  if (currentAccountId.value == null) return;
+  try {
+    await coverExtractApi.add({
+      account_id: currentAccountId.value,
+      file_id: file.id,
+      parent_id: currentParentId.value,
+      directory_chain: breadcrumb.value.map((item) => ({ id: item.id, name: item.name })),
+    });
+    toast.success("已加入视频海报生成工具，可在辅助工具中打开");
+  } catch (e) {
+    toast.error(getApiErrorMessage(e, "加入视频海报生成工具失败"));
+  }
+}
 
 const offline = useOfflineDownloads({
   selectedAccountId: currentAccountId,
@@ -205,6 +227,17 @@ const uploadTaskFailed = computed(
 const uploadTaskSuccess = computed(() =>
   uploadApi.displayUploadTasks.value.some((task) => task.status === "success") || offline.successfulTasks.value.length > 0,
 );
+const transferTaskCount = computed(() => {
+  const active =
+    uploadApi.activeUploadTasks.value.length +
+    uploadApi.activeRelayCount.value +
+    offline.activeTasks.value.length;
+  if (active > 0) return active;
+  return (
+    uploadApi.displayUploadTasks.value.filter((task) => task.status === "failed").length +
+    offline.failedTasks.value.length
+  );
+});
 const showFavorites = computed(() => isAdmin.value && favoritesOpen.value);
 const currentCrumbIds = computed(() => breadcrumb.value.map((item) => item.id));
 const currentFolderFavorited = computed(() =>
@@ -407,25 +440,21 @@ async function handleGenerateCurrentDirectoryStrm() {
       toast.info("当前目录没有需要同步的 STRM");
       return;
     }
-    const parts = [
-      `新增 ${result.created || 0}`,
-      `更新 ${result.updated || 0}`,
-      `删除 ${result.deleted || 0}`,
-      `已存在 ${result.skipped_existing || 0}`,
-    ];
-    if ((result.metadata_created || 0) > 0) {
-      parts.push(`元数据下载 ${result.metadata_created}`);
+    const parts: string[] = [];
+    if ((result.created || 0) > 0) parts.push(`新增 ${result.created}`);
+    if ((result.updated || 0) > 0) parts.push(`更新 ${result.updated}`);
+    if ((result.deleted || 0) > 0) parts.push(`删除 ${result.deleted}`);
+    if (parts.length > 0) {
+      toast.success(`STRM 同步完成：${parts.join(" · ")}`);
+    } else if (
+      (result.metadata_created || 0) > 0 ||
+      (result.metadata_uploaded || 0) > 0 ||
+      (result.metadata_deleted || 0) > 0
+    ) {
+      toast.success("STRM 元数据同步完成");
+    } else {
+      toast.success("STRM 已是最新");
     }
-    if ((result.metadata_uploaded || 0) > 0) {
-      parts.push(`元数据上传 ${result.metadata_uploaded}`);
-    }
-    if ((result.metadata_deleted || 0) > 0) {
-      parts.push(`元数据清理 ${result.metadata_deleted}`);
-    }
-    if ((result.skipped_conflict || 0) > 0) {
-      parts.push(`冲突跳过 ${result.skipped_conflict}`);
-    }
-    toast.success(`STRM 同步完成：${parts.join("，")}`);
   } catch (error) {
     toast.error(getApiErrorMessage(error, "当前目录 STRM 生成失败"));
   } finally {
@@ -544,6 +573,8 @@ async function loadPublicSystemConfig() {
     const mode = cfg.index_account_switch_mode === "floating" ? "floating" : "dropdown";
     accountSwitchMode.value = mode;
     saveAccountSwitchMode(mode);
+    compactHomeEnabled.value = cfg.compact_home_enabled ?? false;
+    localStorage.setItem(COMPACT_HOME_STORAGE_KEY, compactHomeEnabled.value ? "1" : "0");
     strmAutoDetectEnabled.value = cfg.index_strm_auto_detect_enabled ?? true;
   } catch {
     const mode = readSavedAccountSwitchMode();
@@ -885,6 +916,7 @@ onMounted(async () => {
     void Promise.allSettled([
       uploadApi.fetchUploadTasks(),
       offline.fetchTasks(false, true),
+      coverExtractApi.runtime().then((value) => { coverExtractEnabled.value = value.enabled; }),
     ]);
   }
   browserContextReady.value = true;
@@ -895,7 +927,35 @@ onUnmounted(() => {
   stopDragUnlock();
   clearNameAlignApplyProgress();
   uploadApi.cleanupUploadTasks();
+  homeFooterStatus.onOpenTaskPanel(null);
 });
+
+// 简约首页：性能与传输任务状态推送到 footer 单例，由全局 AppFooter 展示。
+const homeFooterStatus = useHomeFooterStatus();
+watch(
+  [
+    () => responseTime.value,
+    () => cacheRate.value,
+    uploadTaskActive,
+    uploadTaskFailed,
+    uploadTaskSuccess,
+    transferTaskCount,
+    transferTaskText,
+  ],
+  () => {
+    homeFooterStatus.update({
+      responseTime: responseTime.value,
+      cacheRate: cacheRate.value,
+      uploadTaskActive: uploadTaskActive.value,
+      uploadTaskFailed: uploadTaskFailed.value,
+      uploadTaskSuccess: uploadTaskSuccess.value,
+      uploadTaskCount: transferTaskCount.value,
+      uploadTaskLabel: transferTaskText.value,
+    });
+  },
+  { immediate: true },
+);
+homeFooterStatus.onOpenTaskPanel(openTaskPanel);
 </script>
 
 <template>
@@ -907,7 +967,7 @@ onUnmounted(() => {
       @update:model-value="store.selectAccount"
     />
 
-    <div class="browser__nav">
+    <div v-if="!compactHomeEnabled" class="browser__nav">
       <AccountSelector
         v-if="accountSwitchMode === 'dropdown'"
         :accounts="accounts"
@@ -931,7 +991,6 @@ onUnmounted(() => {
       </div>
       <FileToolbar
         :is-admin="isAdmin"
-        :selected-count="selectedCount"
         :view="view"
         :refreshing="refreshing"
         :response-time="responseTime"
@@ -940,20 +999,34 @@ onUnmounted(() => {
         :upload-task-failed="uploadTaskFailed"
         :upload-task-success="uploadTaskSuccess"
         :upload-task-label="transferTaskText"
+        :upload-task-count="transferTaskCount"
         :favorites-open="favoritesOpen"
         :offline-download-supported="offline.capability.value?.supported"
+        :compact-home="compactHomeEnabled"
         @refresh="store.refreshFiles"
         @update:view="setView"
         @create-folder="startCreateFolder"
         @upload-file="uploadEntry.handleUploadFile"
         @upload-folder="uploadEntry.handleUploadFolder"
         @offline-download="offline.openModal"
-        @batch-delete="fileActions.requestBatchDelete"
-        @batch-move="fileActions.requestBatchMove"
-        @batch-copy="fileActions.requestBatchCopy"
         @open-upload-tasks="openTaskPanel"
         @toggle-favorites="store.toggleFavoritesOpen"
-      />
+      >
+        <template #navigation>
+          <AccountSelector
+            v-if="accountSwitchMode === 'dropdown'"
+            class="account-selector--compact"
+            :accounts="accounts"
+            :model-value="currentAccountId"
+            @update:model-value="store.selectAccount"
+          />
+          <BreadcrumbNav
+            :items="breadcrumb"
+            :max-visible="7"
+            @navigate="store.goTo"
+          />
+        </template>
+      </FileToolbar>
       <div v-if="strmPrompt.showPrompt.value && !strmGenerating" class="strm-prompt-bar">
         <div class="strm-prompt-bar__main">
           <span class="strm-prompt-bar__dot" aria-hidden="true" />
@@ -1024,7 +1097,12 @@ onUnmounted(() => {
             :download-file="fileActions.downloadFile"
             :move-file="fileActions.requestSingleMove"
             :copy-file="fileActions.requestSingleCopy"
+            :batch-delete-files="fileActions.requestBatchDelete"
+            :batch-move-files="fileActions.requestBatchMove"
+            :batch-copy-files="fileActions.requestBatchCopy"
             :name-align-file="openNameAlign"
+            :cover-extract-enabled="coverExtractEnabled"
+            :cover-extract-file="sendToCoverExtract"
             :drag-active="dragMove.active"
             :active-drop-target-id="dragMove.targetId"
             :drag-unlocked-target-id="dragMove.unlockedTargetId"

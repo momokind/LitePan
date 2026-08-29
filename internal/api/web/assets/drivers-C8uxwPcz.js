@@ -1,1 +1,0 @@
-import{x as e}from"./index-B-nXQRts.js";var t={list:()=>e.get(`/admin/drivers`)};export{t};

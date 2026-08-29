@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"litepan/internal/aiorganize"
+	"litepan/internal/classifyorganize"
 	"litepan/internal/domain"
 	"litepan/internal/file"
 	"litepan/internal/logx"
@@ -15,22 +16,35 @@ import (
 	"litepan/internal/settings"
 )
 
-func wireMediaOrganize(st *storeBundle, files *file.Service, logs *logx.Manager, dataDir string, ai *aiorganize.Service) *mediaorganize.Service {
+func wireMediaOrganize(
+	st *storeBundle,
+	files *file.Service,
+	logs *logx.Manager,
+	dataDir string,
+	ai *aiorganize.Service,
+	classifier *classifyorganize.Service,
+) *mediaorganize.Service {
 	return mediaorganize.NewService(mediaorganize.ServiceOptions{
 		Repo:     st.store.MediaOrganizeTasks,
 		Files:    files,
 		Settings: st.settings,
 		DataDir:  dataDir,
 		Log:      logs.For(logx.ModuleFileOp),
-		Planner:  plannerAdapter{files: files, settings: st.settings, recognition: ai},
+		Planner: plannerAdapter{
+			files:          files,
+			settings:       st.settings,
+			recognition:    ai,
+			classification: classifier,
+		},
 		Executor: executorAdapter{files: files},
 	})
 }
 
 type plannerAdapter struct {
-	files       *file.Service
-	settings    *settings.Service
-	recognition *aiorganize.Service
+	files          *file.Service
+	settings       *settings.Service
+	recognition    *aiorganize.Service
+	classification *classifyorganize.Service
 }
 
 func (a plannerAdapter) Build(
@@ -48,9 +62,11 @@ func (a plannerAdapter) Build(
 	plannerSettings := mediaorganize.EnrichPlannerSettings(a.settings, settings)
 	apiKey := mediaorganize.PlannerTMDBAPIKey(plannerSettings)
 	tmdbClient := tmdb.NewClient(tmdb.Options{
-		APIKey:   apiKey,
-		Language: mediaorganize.PlannerTMDBLanguage(plannerSettings),
-		ProxyURL: tmdb.BuildProxyURL(mediaorganize.TmdbProxyFromSettings(plannerSettings)),
+		APIKey:        apiKey,
+		Language:      mediaorganize.PlannerTMDBLanguage(plannerSettings),
+		ProxyURL:      tmdb.BuildProxyURL(mediaorganize.TmdbProxyFromSettings(plannerSettings)),
+		APIBaseHost:   mediaorganize.PlannerTMDBAPIHost(plannerSettings),
+		ImageBaseHost: mediaorganize.PlannerTMDBImageHost(plannerSettings),
 	})
 
 	var progressFn planner.ProgressFunc
@@ -98,6 +114,7 @@ func (a plannerAdapter) Build(
 		stopFn,
 	)
 	p.SetRecognitionEnhancer(a.recognition)
+	p.SetClassificationEnhancer(a.classification)
 	return p.Build()
 }
 

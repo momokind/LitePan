@@ -8,12 +8,14 @@ import {
 import { fetchStrmTasks, type StrmTask } from "@/api/strm";
 import {
   fetchStrmScrapeItems,
+  fetchStrmScrapeScope,
   fetchStrmScrapeProgress,
   refreshStrmScrapeIndex,
   rematchStrmScrapeItem,
   rescrapeStrmScrapeItem,
   markStrmScrapeNormal,
   runStrmScrape,
+  saveStrmScrapeScope,
   stopStrmScrape,
   type StrmScrapeItem,
   type StrmScrapeItemListQuery,
@@ -24,6 +26,7 @@ import {
   type StrmScrapeProgress,
 } from "@/api/strmScrape";
 import AdminEmptyState from "@/components/admin/AdminEmptyState.vue";
+import StrmScrapeScopePicker from "@/components/admin/StrmScrapeScopePicker.vue";
 import AppButton from "@/components/base/AppButton.vue";
 import AppDropdown from "@/components/base/AppDropdown.vue";
 import AppIconButton from "@/components/base/AppIconButton.vue";
@@ -78,6 +81,9 @@ function saveSortKey(key: SortKey) {
 
 const tasks = ref<StrmTask[]>([]);
 const selectedTaskId = ref<number | null>(null);
+const scopeOpen = ref(false);
+const scopeLoading = ref(false);
+const excludedScopeDirs = ref<string[]>([]);
 const items = ref<StrmScrapeItem[]>([]);
 const stats = ref<StrmScrapeItemListStats>(emptyStats());
 const totalMatched = ref(0);
@@ -114,6 +120,41 @@ const taskOptions = computed(() =>
     label: t.name || `任务 #${t.id}`,
   })),
 );
+const selectedTask = computed(() =>
+  tasks.value.find((t) => Number(t.id) === Number(selectedTaskId.value)) || null,
+);
+const scopeLabel = computed(() =>
+  excludedScopeDirs.value.length ? `已排除 ${excludedScopeDirs.value.length} 个目录` : "全部目录",
+);
+
+async function loadScope() {
+  const taskId = selectedTaskId.value;
+  excludedScopeDirs.value = [];
+  if (!taskId) return;
+  try {
+    const data = await fetchStrmScrapeScope(taskId);
+    if (selectedTaskId.value === taskId) excludedScopeDirs.value = data.excluded_dirs ?? [];
+  } catch (e) {
+    toast.error(getApiErrorMessage(e, "读取刮削范围失败"));
+  }
+}
+
+async function saveScope(dirs: string[]) {
+  const taskId = selectedTaskId.value;
+  if (!taskId || scopeLoading.value) return;
+  scopeLoading.value = true;
+  try {
+    const data = await saveStrmScrapeScope(taskId, dirs);
+    excludedScopeDirs.value = data.excluded_dirs ?? [];
+    scopeOpen.value = false;
+    await loadItems();
+    toast.success("刮削范围已保存");
+  } catch (e) {
+    toast.error(getApiErrorMessage(e, "保存刮削范围失败"));
+  } finally {
+    scopeLoading.value = false;
+  }
+}
 
 const sortOptions: { value: SortKey; label: string }[] = [
   { value: "added_desc", label: "添加时间 · 新→旧" },
@@ -416,7 +457,7 @@ async function refreshAll() {
 
 function statusTitle(status: StrmScrapeItemStatus) {
   if (status === "doubt") return "自动匹配结果需要确认；正确可点「确认」，不正确可点「匹配」";
-  if (status === "miss") return "待刮削：根目录缺 nfo/海报，或短剧等需「设为完结」";
+  if (status === "miss") return "待刮削：根目录缺 nfo/海报，或未收录作品可「完成」";
   return "根目录 nfo / 海报已齐备";
 }
 
@@ -440,10 +481,12 @@ function episodeProgressText(item: StrmScrapeItem) {
 function canMarkEnded(item: StrmScrapeItem) {
   return Boolean(
     item.status !== "doubt" &&
-      item.has_nfo &&
-      item.has_poster &&
       (item.has_pending || item.status === "miss"),
   );
+}
+
+function markActionLabel(item: StrmScrapeItem) {
+  return item.has_nfo && item.has_poster ? "完结" : "完成";
 }
 
 function canConfirmDoubt(item: StrmScrapeItem) {
@@ -452,11 +495,9 @@ function canConfirmDoubt(item: StrmScrapeItem) {
 
 function canRescrape(item: StrmScrapeItem) {
   return Boolean(
-    item.has_nfo &&
-      item.has_poster &&
-      !item.has_pending &&
+    !item.has_pending &&
       item.status === "ok" &&
-      String(item.tmdb_id || "").trim(),
+      (item.manual_done || (item.has_nfo && item.has_poster && String(item.tmdb_id || "").trim())),
   );
 }
 
@@ -468,10 +509,26 @@ function isItemBusy(item: StrmScrapeItem) {
 }
 
 function statusMarkTitle(item: StrmScrapeItem) {
+  if (item.manual_done) return "已手动完成";
   if (item.status === "doubt") return statusTitle(item.status);
   if (item.tv_state === "updating") return "已刮削 · 追更中";
   return statusTitle(item.status);
 }
+
+function trimSlashes(input: string) {
+  return String(input || "").replace(/^\/+|\/+$/g, "");
+}
+
+const rematchSourceDir = computed(() => {
+  const item = matchItem.value;
+  if (!item) return "";
+  const taskBase = trimSlashes(
+    [selectedTask.value?.group_dir || "", selectedTask.value?.output_folder || ""].filter(Boolean).join("/"),
+  );
+  const relDir = trimSlashes(item.rel_dir || "");
+  const parts = [taskBase, relDir].filter(Boolean);
+  return parts.length ? `/${parts.join("/")}` : "/";
+});
 
 function openRematch(item: StrmScrapeItem) {
   matchItem.value = item;
@@ -569,15 +626,51 @@ async function applyMatch() {
   }
 }
 
+async function clearMatchAndComplete() {
+  const item = matchItem.value;
+  if (!item || !selectedTaskId.value || matchApplying.value) return;
+  try {
+    await confirm({
+      title: "取消错误匹配",
+      message: `确认「${item.title}」在 TMDB 中没有对应影片？将清理由 STRM 刮削生成的匹配元数据并标记完成，网盘文件和 STRM 文件不受影响。`,
+      icon: "warning",
+      confirmText: "取消匹配并完成",
+      danger: true,
+    });
+  } catch {
+    return;
+  }
+  matchApplying.value = true;
+  try {
+    const mediaType = matchSearchType.value === "auto" ? item.media_type : matchSearchType.value;
+    const updated = await markStrmScrapeNormal({
+      strm_task_id: selectedTaskId.value,
+      item_id: item.id,
+      media_type: mediaType,
+      clear_match: true,
+    });
+    if (!replaceItem(updated)) await loadItems({ silent: true, preserveLoaded: true });
+    toast.success("已取消匹配并标记完成");
+    closeRematch();
+  } catch (e) {
+    toast.error(getApiErrorMessage(e, "取消匹配失败"));
+  } finally {
+    matchApplying.value = false;
+  }
+}
+
 async function markEnded(item: StrmScrapeItem) {
   if (!selectedTaskId.value || !canMarkEnded(item)) return;
   const title = (item.title || item.folder_name || "该影片").trim();
+  const manual = markActionLabel(item) === "完成";
   try {
     await confirm({
-      title: "设为完结",
-      message: `将「${title}」标记为完结：之后即使 TMDB 或本地有新集，刮削也不会再处理该目录。需要时可用「重新刮削」。确定继续？`,
+      title: manual ? "标记完成" : "设为完结",
+      message: manual
+        ? `将「${title}」标记为完成：该作品将不再自动匹配 TMDB，需要时可用「重新刮削」恢复。确定继续？`
+        : `将「${title}」标记为完结：之后即使 TMDB 或本地有新集，刮削也不会再处理该目录。需要时可用「重新刮削」。确定继续？`,
       icon: "warning",
-      confirmText: "设为完结",
+      confirmText: manual ? "标记完成" : "设为完结",
       danger: false,
     });
   } catch {
@@ -586,9 +679,9 @@ async function markEnded(item: StrmScrapeItem) {
   markingNormalId.value = item.id;
   try {
     await applyNormalState(item);
-    toast.success("已设为完结");
+    toast.success(manual ? "已标记完成" : "已设为完结");
   } catch (e) {
-    toast.error(getApiErrorMessage(e, "设为完结失败"));
+    toast.error(getApiErrorMessage(e, manual ? "标记完成失败" : "设为完结失败"));
   } finally {
     markingNormalId.value = "";
   }
@@ -612,6 +705,7 @@ async function applyNormalState(item: StrmScrapeItem) {
   const updated = await markStrmScrapeNormal({
     strm_task_id: selectedTaskId.value,
     item_id: item.id,
+    media_type: item.media_type,
   });
   if (!replaceItem(updated)) {
     await loadItems({ silent: true, preserveLoaded: true });
@@ -633,7 +727,7 @@ async function rescrapeItem(item: StrmScrapeItem) {
       return;
     }
     if (!replaceItem(result.item)) await loadItems({ silent: true, preserveLoaded: true });
-    toast.success("已重新刮削");
+    toast.success(item.manual_done ? "已恢复待刮削" : "已重新刮削");
   } catch (e) {
     toast.error(getApiErrorMessage(e, "重新刮削失败"));
   } finally {
@@ -642,6 +736,7 @@ async function rescrapeItem(item: StrmScrapeItem) {
 }
 
 watch(selectedTaskId, () => {
+  void loadScope();
   if (!booted.value) return;
   filter.value = "all";
   typeFilter.value = "all";
@@ -712,6 +807,16 @@ defineExpose({
             @update:model-value="(v) => (selectedTaskId = Number(v) || null)"
           />
         </div>
+        <AppButton
+          v-if="selectedTaskId"
+          variant="secondary"
+          size="md"
+          class="scrape-panel__scope-button"
+          :disabled="running || scopeLoading"
+          @click="scopeOpen = true"
+        >
+          {{ scopeLabel }}
+        </AppButton>
       </div>
       <div class="scrape-panel__head-actions">
         <div class="scrape-search-expand" :class="{ 'scrape-search-expand--open': searchOpen }">
@@ -724,38 +829,42 @@ defineExpose({
             :tabindex="searchOpen ? 0 : -1"
             @keydown.escape.prevent="toggleSearch"
           />
-          <button
-            type="button"
-            class="scrape-icon-btn"
-            :class="{ 'scrape-icon-btn--active': searchOpen || Boolean(keyword) }"
-            :title="searchOpen ? '收起搜索' : '搜索片名'"
-            :aria-label="searchOpen ? '收起搜索' : '搜索片名'"
-            :aria-expanded="searchOpen"
-            @click="toggleSearch"
-          >
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-              <circle cx="7" cy="7" r="4.5" />
-              <path d="m10.5 10.5 3 3" />
-            </svg>
-          </button>
-        </div>
-        <AppDropdown v-model:open="sortMenuOpen" trigger="click" align="right">
-          <template #trigger="{ open, toggle }">
+          <span class="scrape-tip">
             <button
               type="button"
               class="scrape-icon-btn"
-              :title="currentSortLabel"
-              :aria-expanded="open"
-              aria-label="排序"
-              @click.stop="toggle"
+              :class="{ 'scrape-icon-btn--active': searchOpen || Boolean(keyword) }"
+              :aria-label="searchOpen ? '收起搜索' : '搜索片名'"
+              :aria-expanded="searchOpen"
+              @click="toggleSearch"
             >
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-                <path d="M2 4h10" />
-                <path d="M2 8h8" />
-                <path d="M2 12h6" />
-                <path d="m12 10 2 2 2-2" />
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <circle cx="7" cy="7" r="4.5" />
+                <path d="m10.5 10.5 3 3" />
               </svg>
             </button>
+            <span class="scrape-tip__bubble">{{ searchOpen ? "收起搜索" : "搜索片名" }}</span>
+          </span>
+        </div>
+        <AppDropdown v-model:open="sortMenuOpen" trigger="click" align="right">
+          <template #trigger="{ open, toggle }">
+            <span class="scrape-tip">
+              <button
+                type="button"
+                class="scrape-icon-btn"
+                :aria-expanded="open"
+                aria-label="排序"
+                @click.stop="toggle"
+              >
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+                  <path d="M2 4h10" />
+                  <path d="M2 8h8" />
+                  <path d="M2 12h6" />
+                  <path d="m12 10 2 2 2-2" />
+                </svg>
+              </button>
+              <span class="scrape-tip__bubble">{{ currentSortLabel }}</span>
+            </span>
           </template>
           <template #panel>
             <div class="scrape-sort-menu">
@@ -772,25 +881,41 @@ defineExpose({
             </div>
           </template>
         </AppDropdown>
-        <AppIconButton
-          icon="fa-sync-alt"
-          label="刷新"
-          variant="secondary"
-          size="md"
-          :disabled="refreshing"
-          title="重建刮削索引（扫描本地 STRM 目录）"
-          @click="refreshAll"
-        />
-        <AppIconButton
-          icon="settings"
-          label="STRM 刮削设置"
-          variant="secondary"
-          size="md"
-          title="STRM 刮削设置"
-          @click="emit('open-settings')"
-        />
+        <span class="scrape-tip scrape-tip--right">
+          <AppIconButton
+            icon="fa-sync-alt"
+            label="刷新"
+            variant="secondary"
+            size="md"
+            :disabled="refreshing"
+            no-native-title
+            @click="refreshAll"
+          />
+          <span class="scrape-tip__bubble">重建刮削索引（扫描本地 STRM 目录）</span>
+        </span>
+        <span class="scrape-tip scrape-tip--right">
+          <AppIconButton
+            icon="settings"
+            label="STRM 刮削设置"
+            variant="secondary"
+            size="md"
+            no-native-title
+            @click="emit('open-settings')"
+          />
+          <span class="scrape-tip__bubble">STRM 刮削设置</span>
+        </span>
       </div>
     </div>
+
+    <StrmScrapeScopePicker
+      v-if="selectedTaskId"
+      :open="scopeOpen"
+      :task-id="selectedTaskId"
+      :task-name="selectedTask?.name"
+      :excluded-dirs="excludedScopeDirs"
+      @close="scopeOpen = false"
+      @save="saveScope"
+    />
 
     <div v-if="running && progress" class="scrape-progress">
       <span class="scrape-progress__msg">{{ progress.message || "刮削进行中…" }}</span>
@@ -994,11 +1119,11 @@ defineExpose({
                     type="button"
                     class="scrape-card__act scrape-card__act--ghost"
                     :disabled="running || markingNormalId === item.id || Boolean(rescrapingId)"
-                    :title="markingNormalId === item.id ? '处理中…' : '设为完结'"
+                    :title="markingNormalId === item.id ? '处理中…' : markActionLabel(item) === '完成' ? '标记完成' : '设为完结'"
                     @click="markEnded(item)"
                   >
                     <i class="fas fa-flag-checkered"></i>
-                    <span>{{ markingNormalId === item.id ? "…" : "完结" }}</span>
+                    <span>{{ markingNormalId === item.id ? "…" : markActionLabel(item) }}</span>
                   </button>
                   <button
                     v-else-if="canRescrape(item)"
@@ -1055,6 +1180,10 @@ defineExpose({
 
     <AppModal :open="matchOpen" title="重新匹配元数据" size="account" @close="closeRematch">
       <div v-if="matchItem" class="scrape-match">
+        <div v-if="rematchSourceDir" class="scrape-match__source">
+          <div class="scrape-match__source-label">作品目录</div>
+          <div class="scrape-match__source-path" :title="rematchSourceDir">{{ rematchSourceDir }}</div>
+        </div>
         <div class="scrape-match__row">
           <div class="scrape-match__type">
             <AppSelect v-model="matchSearchType" :options="matchTypeOptions" />
@@ -1102,7 +1231,16 @@ defineExpose({
           </p>
         </div>
         <div class="scrape-match__foot">
-          <AppButton type="button" variant="secondary" @click="closeRematch">取消</AppButton>
+          <AppButton
+            v-if="String(matchItem.tmdb_id || '').trim()"
+            class="scrape-match__clear"
+            type="button"
+            variant="danger"
+            :disabled="matchApplying"
+            @click="clearMatchAndComplete"
+          >
+            无匹配
+          </AppButton>
           <AppButton
             type="button"
             variant="primary"
@@ -1154,6 +1292,31 @@ defineExpose({
   border-bottom: 1px solid var(--border-soft);
   background: var(--panel-head-bg);
 }
+@media (max-width: 560px) {
+  /* 手机小屏：头部允许换行，避免标题/任务选择器与右侧操作按钮挤压重叠 */
+  .scrape-panel__head {
+    flex-wrap: wrap;
+    gap: 8px 12px;
+  }
+
+  .scrape-panel__head-left {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .scrape-panel__head-actions {
+    margin-left: auto;
+  }
+
+  .scrape-panel__task-select {
+    min-width: 0;
+  }
+
+  .scrape-search-expand--open .scrape-search-expand__input {
+    width: min(200px, 42vw);
+    max-width: min(200px, 42vw);
+  }
+}
 .scrape-panel__head-left {
   display: flex;
   align-items: center;
@@ -1172,6 +1335,9 @@ defineExpose({
   width: min(200px, 42vw);
   flex: 0 1 200px;
   min-width: 120px;
+}
+.scrape-panel__scope-button {
+  white-space: nowrap;
 }
 .scrape-panel__head-actions {
   display: flex;
@@ -1200,6 +1366,63 @@ defineExpose({
 .scrape-icon-btn svg {
   width: 16px;
   height: 16px;
+}
+
+/* 图标按钮 hover 气泡：替代浏览器原生 title 提示。
+   气泡向下展开（面板容器 overflow:hidden，向上冒会被裁切）。 */
+.scrape-tip {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.scrape-tip__bubble {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  padding: 5px 10px;
+  background: #1e293b;
+  color: #e2e8f0;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.2);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.scrape-tip__bubble::after {
+  content: "";
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-bottom-color: #1e293b;
+}
+.scrape-tip:hover .scrape-tip__bubble,
+.scrape-tip:focus-within .scrape-tip__bubble {
+  opacity: 1;
+}
+/* 靠右按钮：气泡右对齐，避免超出视口 */
+.scrape-tip--right .scrape-tip__bubble {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+.scrape-tip--right .scrape-tip__bubble::after {
+  left: auto;
+  right: 8px;
+  transform: none;
+}
+.dark .scrape-tip__bubble {
+  background: #e2e8f0;
+  color: #1e293b;
+}
+.dark .scrape-tip__bubble::after {
+  border-bottom-color: #e2e8f0;
 }
 .scrape-search-expand {
   display: inline-flex;
@@ -1688,6 +1911,31 @@ defineExpose({
   flex-direction: column;
   gap: 14px;
 }
+.scrape-match__source {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: linear-gradient(
+    180deg,
+    var(--tab-active-bg) 0%,
+    color-mix(in srgb, var(--surface) 88%, var(--brand) 12%) 100%
+  );
+}
+.scrape-match__source-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+.scrape-match__source-path {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+  word-break: break-all;
+}
 .scrape-match__row {
   display: flex;
   align-items: center;
@@ -1826,6 +2074,9 @@ defineExpose({
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+.scrape-match__clear {
+  margin-right: auto;
 }
 @media (max-width: 560px) {
   .scrape-match__grid {

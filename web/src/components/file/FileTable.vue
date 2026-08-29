@@ -29,7 +29,12 @@ const props = defineProps<{
   downloadFile: (file: FileItem) => void;
   moveFile: (file: FileItem) => void;
   copyFile: (file: FileItem) => void;
+  batchDeleteFiles: () => void;
+  batchMoveFiles: () => void;
+  batchCopyFiles: () => void;
   nameAlignFile: (file: FileItem) => void;
+  coverExtractEnabled: boolean;
+  coverExtractFile: (file: FileItem) => void;
   dragActive?: boolean;
   activeDropTargetId?: string;
   dragUnlockedTargetId?: string;
@@ -55,6 +60,7 @@ const emit = defineEmits<{
 
 const inline = useFileTableInline({
   files: toRef(props, "files"),
+  selectedIds: toRef(props, "selectedIds"),
   isAdmin: toRef(props, "isAdmin"),
   loading: toRef(props, "loading"),
   createFolderRequest: toRef(props, "createFolderRequest"),
@@ -65,7 +71,12 @@ const inline = useFileTableInline({
   downloadFile: (file) => props.downloadFile(file),
   moveFile: (file) => props.moveFile(file),
   copyFile: (file) => props.copyFile(file),
+  batchDeleteFiles: () => props.batchDeleteFiles(),
+  batchMoveFiles: () => props.batchMoveFiles(),
+  batchCopyFiles: () => props.batchCopyFiles(),
   nameAlignFile: (file) => props.nameAlignFile(file),
+  coverExtractEnabled: toRef(props, "coverExtractEnabled"),
+  coverExtractFile: (file) => props.coverExtractFile(file),
 });
 
 const {
@@ -1350,21 +1361,6 @@ function handleHeaderMenuKeydown(event: KeyboardEvent) {
   color: #16a34a;
 }
 
-.drag-lock__text {
-  font-size: 12px;
-  line-height: 1;
-  font-weight: 650;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-shadow: 0 1px 2px color-mix(in srgb, var(--surface) 72%, transparent);
-}
-
-.drag-lock--ready .drag-lock__text {
-  color: #15803d;
-}
-
 @media (max-width: 768px) {
   .file-list {
     overflow-x: hidden;
@@ -1384,10 +1380,6 @@ function handleHeaderMenuKeydown(event: KeyboardEvent) {
 
   .drag-lock {
     gap: 7px;
-  }
-
-  .drag-lock__text {
-    font-size: 11px;
   }
 }
 </style>

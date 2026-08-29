@@ -14,7 +14,7 @@ import (
 
 // ApplyBindingToPlan 用用户选择的 TMDB 影片替换当前计划中该组的旧动作，
 // 仅对这一组局部重规划，不影响计划里其他组。
-func (s *Service) ApplyBindingToPlan(ctx context.Context, taskID, groupUID, tmdbID string) (*Plan, error) {
+func (s *Service) ApplyBindingToPlan(ctx context.Context, taskID, groupUID, tmdbID, selectedMediaKind string) (*Plan, error) {
 	plan, err := s.loadPlan(taskID)
 	if err != nil {
 		return nil, err
@@ -35,6 +35,10 @@ func (s *Service) ApplyBindingToPlan(ctx context.Context, taskID, groupUID, tmdb
 	indexes, mediaKind := collectBindingActionIndexes(plan, groupUID)
 	if len(indexes) == 0 {
 		return nil, domain.Errorf(domain.CodeValidation, "当前计划中未找到该作品组")
+	}
+	selectedMediaKind = strings.ToLower(strings.TrimSpace(selectedMediaKind))
+	if selectedMediaKind == "movie" || selectedMediaKind == "tv" {
+		mediaKind = selectedMediaKind
 	}
 	group := bindingFindManualMatchGroup(plan, groupUID, mediaKind)
 	if strings.TrimSpace(group.GroupUID) == "" {
@@ -76,9 +80,11 @@ func (s *Service) replanMatchedGroup(
 	}
 	plannerSettings := EnrichPlannerSettings(s.settings, settingsDict)
 	tmdbClient := tmdb.NewClient(tmdb.Options{
-		APIKey:   PlannerTMDBAPIKey(plannerSettings),
-		Language: PlannerTMDBLanguage(plannerSettings),
-		ProxyURL: tmdb.BuildProxyURL(TmdbProxyFromSettings(plannerSettings)),
+		APIKey:        PlannerTMDBAPIKey(plannerSettings),
+		Language:      PlannerTMDBLanguage(plannerSettings),
+		ProxyURL:      tmdb.BuildProxyURL(TmdbProxyFromSettings(plannerSettings)),
+		APIBaseHost:   PlannerTMDBAPIHost(plannerSettings),
+		ImageBaseHost: PlannerTMDBImageHost(plannerSettings),
 	})
 	p := planner.New(
 		ctx,

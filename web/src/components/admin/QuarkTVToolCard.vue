@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import { getApiErrorMessage } from "@/api/client";
 import {
   quarkTVApi,
@@ -10,35 +10,48 @@ import {
 import { confirm } from "@/composables/useConfirm";
 import { toast } from "@/composables/useToast";
 import AppButton from "@/components/base/AppButton.vue";
-import AppModal from "@/components/base/AppModal.vue";
-import AppSelect from "@/components/base/AppSelect.vue";
-import SettingsBoolSegment from "@/components/admin/SettingsBoolSegment.vue";
 import CloudToolCard from "@/components/admin/CloudToolCard.vue";
+import ProxyWorkspace, { type ProxyField, type ProxyWorkspaceItem } from "@/components/admin/ProxyWorkspace.vue";
 import QuarkTVBindModal from "@/components/admin/QuarkTVBindModal.vue";
 
 const props = withDefaults(defineProps<{ searchQuery?: string }>(), { searchQuery: "" });
 
-const qtvStatus = ref<QuarkTVStatus>({ enabled: false, available: false, bindings: [] });
+const qtvStatus = ref<QuarkTVStatus>({ enabled: false, available: false, play_mode: "adaptive", client_list_mode: "proxy_list", proxy_clients: "vidhub", bindings: [] });
 const qtvSaving = ref(false);
 const qtvAccounts = ref<QuarkTVAccount[]>([]);
 const qtvBindOpen = ref(false);
-const qtvManageOpen = ref(false);
-const qtvUnbindingID = ref<number | null>(null);
-const qtvSettingsOpen = ref(false);
-const qtvSettingsSaving = ref(false);
-const qtvEditingBinding = ref<QuarkTVBinding | null>(null);
-const qtvResolution = ref("4k");
-const qtvAllowDolby = ref(false);
+const qtvWorkspaceOpen = ref(false);
+const qtvSavingSettings = ref(false);
+const qtvSelectedID = ref("");
+const qtvForm = reactive({
+  preferred_resolution: "4k",
+  allow_dolby: "false",
+  play_mode: "adaptive",
+  client_list_mode: "proxy_list",
+  proxy_clients: "vidhub",
+});
 
-const settingsChanged = computed(
-  () =>
-    !!qtvEditingBinding.value &&
-    (qtvResolution.value !== normalizeResolutionForUI(qtvEditingBinding.value.preferred_resolution || "auto") ||
-      qtvAllowDolby.value !== !!qtvEditingBinding.value.allow_dolby),
-);
+const settingsChanged = computed(() => {
+  const binding = selectedBinding.value;
+  if (!binding) return false;
+  return (
+    qtvForm.preferred_resolution !== normalizeResolutionForUI(binding.preferred_resolution || "auto") ||
+    qtvForm.allow_dolby !== String(!!binding.allow_dolby) ||
+    qtvForm.play_mode !== qtvStatus.value.play_mode ||
+    qtvForm.client_list_mode !== qtvStatus.value.client_list_mode ||
+    normalizeClientKeywords(qtvForm.proxy_clients) !== normalizeClientKeywords(qtvStatus.value.proxy_clients)
+  );
+});
+
+// 非 SVIP 会员且杜比未开启时，不允许新开启杜比视界（已开启的可继续使用）。
+const dolbyControlDisabled = computed(() => {
+  const binding = selectedBinding.value;
+  if (!binding) return false;
+  return !supportsAdvancedQuality(binding.membership) && qtvForm.allow_dolby !== "true";
+});
 
 const settingsResolutionOptions = computed(() => {
-  const binding = qtvEditingBinding.value;
+  const binding = selectedBinding.value;
   const advancedDisabled = binding ? !supportsAdvancedQuality(binding.membership) : false;
   return [
     { value: "4k", label: "4K", disabled: advancedDisabled, tag: "SVIP" },
@@ -48,10 +61,64 @@ const settingsResolutionOptions = computed(() => {
   ];
 });
 
-const dolbyControlDisabled = computed(() => {
-  const binding = qtvEditingBinding.value;
-  if (!binding) return false;
-  return !supportsAdvancedQuality(binding.membership) && !qtvAllowDolby.value;
+const selectedBinding = computed<QuarkTVBinding | null>(
+  () => qtvStatus.value.bindings.find((b) => String(b.account_id) === qtvSelectedID.value) || null,
+);
+
+const workspaceItems = computed<ProxyWorkspaceItem[]>(() =>
+  qtvStatus.value.bindings.map((b) => ({
+    id: String(b.account_id),
+    name: b.account_name,
+    running: true,
+    subtitle: `TV · ${b.tv_nickname || "未知"} · ${b.membership?.trim() || "普通"}`,
+  })),
+);
+
+const workspaceFields = computed<ProxyField[]>(() => {
+  const fields: ProxyField[] = [
+    {
+      key: "preferred_resolution",
+      label: "清晰度偏好",
+      type: "select",
+      options: settingsResolutionOptions.value,
+    },
+    {
+      key: "allow_dolby",
+      label: "杜比视界",
+      type: "switch",
+      switchLabel: "杜比视界",
+      switchTag: "SVIP 限额",
+      switchHint: "开启后优先尝试杜比视界；不可用时会自动降级到上面的清晰度偏好。",
+      disabled: dolbyControlDisabled.value,
+    },
+  ];
+  fields.push({
+    key: "play_mode",
+    label: "接管模式",
+    type: "select",
+    helpTitle: "接管模式",
+    helpBody: "<p><strong>策略分流：</strong>可选择「直连名单」或「代理名单」，再按播放器名称分别走夸克 TV 或本机代理。</p><p><strong>智能变轨：</strong>普通视频走夸克 TV，遇到 HLS 视频自动改走本机代理。</p><p><strong>强制直连：</strong>所有视频都走夸克 TV，不兼容时可能无法播放。</p>",
+    options: [
+      { value: "split", label: "策略分流" },
+      { value: "adaptive", label: "智能变轨" },
+      { value: "direct", label: "强制直连" },
+    ],
+  });
+  fields.push({
+    key: "proxy_clients",
+    label: "客户端分流",
+    type: "segmented-text",
+    segmentKey: "client_list_mode",
+    options: [
+      { value: "direct_list", label: "直连名单" },
+      { value: "proxy_list", label: "代理名单" },
+    ],
+    helpTitle: "客户端分流",
+    helpBody: "直连名单：名单里的播放器走夸克 TV，其他走本机代理。<br>代理名单：名单里的播放器走本机代理，其他走夸克 TV。<br>多个名称用分号分隔，不区分大小写。Emby 等由服务端 FFmpeg 拉流时，无法识别原播放器名称。",
+    placeholder: "例如：vidhub",
+    hidden: qtvForm.play_mode !== "split",
+  });
+  return fields;
 });
 
 function matches(title: string) {
@@ -60,7 +127,7 @@ function matches(title: string) {
 }
 
 async function load() {
-  qtvStatus.value = await quarkTVApi.status().catch(() => ({ enabled: false, available: false, bindings: [] }));
+  qtvStatus.value = await quarkTVApi.status().catch(() => ({ enabled: false, available: false, play_mode: "adaptive" as const, client_list_mode: "proxy_list" as const, proxy_clients: "vidhub", bindings: [] }));
 }
 
 onMounted(() => {
@@ -86,30 +153,24 @@ async function toggleEnabled() {
   }
 }
 
-function openManage() {
-  qtvManageOpen.value = true;
+function openWorkspace() {
+  qtvWorkspaceOpen.value = true;
+  if (qtvStatus.value.bindings.length) {
+    selectBinding(String(qtvStatus.value.bindings[0].account_id));
+  } else {
+    qtvSelectedID.value = "";
+  }
 }
 
-function closeManage() {
-  qtvManageOpen.value = false;
-}
-
-function openSettings(binding: QuarkTVBinding) {
-  qtvEditingBinding.value = binding;
-  qtvResolution.value = normalizeResolutionForUI(binding.preferred_resolution || "auto");
-  qtvAllowDolby.value = !!binding.allow_dolby;
-  qtvSettingsOpen.value = true;
-}
-
-function closeSettings() {
-  if (qtvSettingsSaving.value) return;
-  qtvSettingsOpen.value = false;
-  qtvEditingBinding.value = null;
-}
-
-function resolutionLabel(value: string) {
-  const normalized = normalizeResolutionForUI(value);
-  return settingsResolutionOptions.value.find((item) => item.value === normalized)?.label || "4K";
+function selectBinding(id: string) {
+  const binding = qtvStatus.value.bindings.find((b) => String(b.account_id) === id);
+  if (!binding) return;
+  qtvSelectedID.value = id;
+  qtvForm.preferred_resolution = normalizeResolutionForUI(binding.preferred_resolution || "auto");
+  qtvForm.allow_dolby = String(!!binding.allow_dolby);
+  qtvForm.play_mode = qtvStatus.value.play_mode || "adaptive";
+  qtvForm.client_list_mode = qtvStatus.value.client_list_mode || "proxy_list";
+  qtvForm.proxy_clients = qtvStatus.value.proxy_clients;
 }
 
 function displayMembership(binding: QuarkTVBinding | null) {
@@ -139,6 +200,20 @@ function normalizeResolutionForUI(value: string) {
   }
 }
 
+function normalizeClientKeywords(value: string) {
+  const seen = new Set<string>();
+  return value
+    .split(/[;；]/)
+    .map((item) => item.trim())
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join(";");
+}
+
 async function openBind() {
   try {
     const res = await quarkTVApi.accounts();
@@ -148,7 +223,6 @@ async function openBind() {
       toast.error(res.accounts.length === 0 ? "请先添加并启用夸克网盘账号" : "所有夸克账号均已绑定");
       return;
     }
-    qtvManageOpen.value = false;
     qtvBindOpen.value = true;
   } catch (e) {
     toast.error(getApiErrorMessage(e, "加载夸克账号失败"));
@@ -161,23 +235,30 @@ function closeBind() {
 
 async function onBound() {
   qtvBindOpen.value = false;
-  const st = await quarkTVApi.status().catch(() => ({ enabled: false, available: false, bindings: [] }));
+  const st = await quarkTVApi.status().catch(() => ({ enabled: false, available: false, play_mode: "adaptive" as const, client_list_mode: "proxy_list" as const, proxy_clients: "vidhub", bindings: [] }));
   qtvStatus.value = st;
+  if (st.bindings.length) {
+    selectBinding(String(st.bindings[st.bindings.length - 1].account_id));
+  }
   if (!st.enabled) {
     qtvSaving.value = true;
     try {
       await quarkTVApi.setEnabled(true);
       qtvStatus.value.enabled = true;
-      toast.success("已启用夸克 STRM 播放接管");
+      toast.success("已启用夸克 STRM 接管");
     } catch (e) {
       toast.error(getApiErrorMessage(e, "绑定成功但启用失败，请手动开启"));
     } finally {
       qtvSaving.value = false;
     }
+  } else {
+    toast.success("绑定成功");
   }
 }
 
-async function unbind(binding: QuarkTVBinding) {
+async function unbind() {
+  const binding = selectedBinding.value;
+  if (!binding) return;
   const ok = await confirm({
     title: "解绑夸克 TV？",
     message: `将解绑「${binding.account_name}」的夸克 TV 绑定，该账号播放恢复夸克驱动本机代理。`,
@@ -186,53 +267,58 @@ async function unbind(binding: QuarkTVBinding) {
     danger: true,
   }).catch(() => false);
   if (!ok) return;
-  qtvUnbindingID.value = binding.account_id;
   try {
     await quarkTVApi.unbind(binding.account_id);
     await load();
+    if (qtvStatus.value.bindings.length) {
+      selectBinding(String(qtvStatus.value.bindings[0].account_id));
+    } else {
+      qtvSelectedID.value = "";
+    }
     toast.success("已解绑");
   } catch (e) {
     toast.error(getApiErrorMessage(e, "解绑失败"));
-  } finally {
-    qtvUnbindingID.value = null;
   }
 }
 
 async function saveSettings() {
-  if (!qtvEditingBinding.value) return;
-  qtvSettingsSaving.value = true;
+  const binding = selectedBinding.value;
+  if (!binding) return;
+  qtvSavingSettings.value = true;
   try {
-    const updated = await quarkTVApi.updateBindingSettings({
-      account_id: qtvEditingBinding.value.account_id,
-      preferred_resolution: qtvResolution.value,
-      allow_dolby: qtvAllowDolby.value,
+    const result = await quarkTVApi.updateBindingSettings({
+      account_id: binding.account_id,
+      preferred_resolution: qtvForm.preferred_resolution,
+      allow_dolby: qtvForm.allow_dolby === "true",
+		play_mode: qtvForm.play_mode as "split" | "adaptive" | "direct",
+		client_list_mode: qtvForm.client_list_mode as "direct_list" | "proxy_list",
+      proxy_clients: qtvForm.proxy_clients,
     });
     qtvStatus.value.bindings = qtvStatus.value.bindings.map((item) =>
-      item.account_id === updated.account_id ? updated : item,
+      item.account_id === result.binding.account_id ? result.binding : item,
     );
-    qtvEditingBinding.value = updated;
-    qtvSettingsOpen.value = false;
+    qtvStatus.value.proxy_clients = result.proxy_clients;
+		qtvStatus.value.play_mode = result.play_mode;
+		qtvStatus.value.client_list_mode = result.client_list_mode;
+    qtvForm.proxy_clients = result.proxy_clients;
     toast.success("播放设置已保存");
   } catch (e) {
     toast.error(getApiErrorMessage(e, "保存播放设置失败"));
   } finally {
-    qtvSettingsSaving.value = false;
+    qtvSavingSettings.value = false;
   }
 }
 </script>
 
 <template>
-  <div v-show="matches('夸克 STRM 播放接管')">
+  <div v-show="matches('夸克 STRM 接管')">
     <CloudToolCard
       :enabled="qtvStatus.enabled"
-      name="夸克 STRM 播放接管"
-      driver="作用于夸克网盘 · STRM 播放请求走 TV 302 直链"
+      name="夸克 STRM 接管"
+      driver="夸克网盘 · TV 版 302 直链"
       logo-src="/logos/quark.png"
       logo-alt="夸克"
-      :tags="[
-        { label: '夸克网盘' },
-        { label: '实验性', variant: 'warn' },
-      ]"
+      :tags="[{ label: '实验性', variant: 'warn' }]"
       :stat-value="qtvStatus.bindings.length"
       stat-label="个绑定账号"
     >
@@ -241,7 +327,7 @@ async function saveSettings() {
           class="check-toggle"
           type="button"
           :class="{ on: qtvStatus.enabled }"
-          :aria-label="qtvStatus.enabled ? '停用夸克 STRM 播放接管' : '启用夸克 STRM 播放接管'"
+          :aria-label="qtvStatus.enabled ? '停用夸克 STRM 接管' : '启用夸克 STRM 接管'"
           :disabled="qtvSaving || !qtvStatus.available"
           title="启用 / 停用"
           @click="toggleEnabled"
@@ -258,41 +344,40 @@ async function saveSettings() {
           </svg>
         </button>
       </template>
-      开启后，夸克网盘账号的 STRM 播放请求改走夸克 TV 的 302 直链，由夸克转码播放，画质会明显下降，且存在部分字幕不可用问题，请根据需要开启或关闭。
+      让夸克 STRM 改走 TV 版 302 直链；转码画质和字幕受影响且部分第三方播放器不兼容。
       <template #actions>
-        <AppButton variant="secondary" :disabled="qtvSaving" @click="openManage">
-          账号绑定设置
+        <AppButton size="sm" variant="secondary" :disabled="qtvSaving" @click="openWorkspace">
+          账号绑定
         </AppButton>
       </template>
     </CloudToolCard>
 
-    <AppModal :open="qtvManageOpen" title="夸克 STRM 播放接管 · 账号绑定" size="md" @close="closeManage">
-      <div v-if="qtvStatus.bindings.length" class="qtv-list">
-        <div v-for="b in qtvStatus.bindings" :key="b.account_id" class="qtv-item">
-          <div class="qtv-item__main">
-            <strong>{{ b.account_name }}</strong>
-            <div class="qtv-item__meta">
-              <span class="qtv-item__meta-text">
-                TV · {{ b.tv_nickname || "未知" }} · {{ resolutionLabel(b.preferred_resolution || "auto") }} ·
-                {{ b.allow_dolby ? "杜比开启" : "杜比关闭" }}
-              </span>
-            </div>
-          </div>
-          <div class="qtv-item__actions">
-            <AppButton variant="secondary" @click="openSettings(b)">播放设置</AppButton>
-            <AppButton variant="danger" :disabled="qtvUnbindingID === b.account_id" @click="unbind(b)">
-              {{ qtvUnbindingID === b.account_id ? "解绑中…" : "解绑" }}
-            </AppButton>
-          </div>
-        </div>
-      </div>
-      <div v-else class="qtv-empty">还没有绑定账号</div>
-      <template #footer>
-        <div class="modal-footer-center">
-          <AppButton variant="primary" @click="openBind">添加绑定</AppButton>
-        </div>
-      </template>
-    </AppModal>
+    <ProxyWorkspace
+      v-model="qtvForm"
+      :open="qtvWorkspaceOpen"
+      title="夸克 STRM 接管 · 账号绑定"
+      caption="已绑定账号"
+      icon="☁️"
+      :subtitle="selectedBinding ? `TV 账号：${selectedBinding.tv_nickname || '未知'} · 会员：${displayMembership(selectedBinding)}` : ''"
+      :items="workspaceItems"
+      :selected-id="qtvSelectedID"
+      :fields="workspaceFields"
+      :name-editable="false"
+      :show-entry="false"
+      :show-test="false"
+      :saving="qtvSavingSettings"
+      :save-disabled="!settingsChanged"
+      save-label="保存设置"
+      add-label="＋ 添加绑定"
+      remove-label="解绑"
+      :deletable="Boolean(selectedBinding)"
+      :addable="true"
+      @select="selectBinding"
+      @add="openBind"
+      @remove="unbind"
+      @save="saveSettings"
+      @cancel="qtvWorkspaceOpen = false"
+    />
 
     <QuarkTVBindModal
       :open="qtvBindOpen"
@@ -300,39 +385,6 @@ async function saveSettings() {
       @close="closeBind"
       @bound="onBound"
     />
-
-    <AppModal :open="qtvSettingsOpen" title="夸克 TV 播放设置" size="md" @close="closeSettings">
-      <div v-if="qtvEditingBinding" class="qtv-settings">
-        <div class="qtv-settings__hint">
-          <strong>{{ qtvEditingBinding.account_name }}</strong>
-          <span>TV 账号：{{ qtvEditingBinding.tv_nickname || "未知" }} · 当前会员：{{ displayMembership(qtvEditingBinding) }}</span>
-        </div>
-        <label class="qtv-settings__field">
-          <span>清晰度偏好</span>
-          <AppSelect v-model="qtvResolution" :options="settingsResolutionOptions" />
-        </label>
-        <label class="qtv-settings__field">
-          <div class="qtv-settings__field-head">
-            <span>杜比视界</span>
-            <span class="qtv-settings__tag">SVIP 限额</span>
-          </div>
-          <SettingsBoolSegment
-            v-model="qtvAllowDolby"
-            label="杜比视界"
-            off-label="关闭"
-            on-label="开启"
-            :disabled="dolbyControlDisabled"
-          />
-          <small>开启后优先尝试杜比视界；不可用时会自动降级到上面的清晰度偏好。</small>
-        </label>
-      </div>
-      <template #footer>
-        <AppButton variant="secondary" :disabled="qtvSettingsSaving" @click="closeSettings">取消</AppButton>
-        <AppButton variant="primary" :disabled="qtvSettingsSaving || !settingsChanged" @click="saveSettings">
-          {{ qtvSettingsSaving ? "保存中…" : "保存设置" }}
-        </AppButton>
-      </template>
-    </AppModal>
   </div>
 </template>
 
@@ -375,131 +427,5 @@ async function saveSettings() {
 .check-toggle:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-.qtv-list {
-  display: grid;
-  gap: 8px;
-  max-height: 340px;
-  overflow-y: auto;
-}
-
-.qtv-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  padding: 11px 13px;
-  background: var(--surface-sunken);
-}
-
-.qtv-item__main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.qtv-item__main strong {
-  font-size: 14px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.qtv-item__meta {
-  display: block;
-  min-width: 0;
-}
-
-.qtv-item__meta-text {
-  display: block;
-  font-size: 12px;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.qtv-item__actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.qtv-empty {
-  padding: 28px 0;
-  text-align: center;
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
-.modal-footer-center {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-}
-
-.qtv-settings {
-  display: grid;
-  gap: 16px;
-}
-
-.qtv-settings__hint {
-  display: grid;
-  gap: 4px;
-  padding: 12px 14px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  background: var(--surface-sunken);
-}
-
-.qtv-settings__hint strong {
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.qtv-settings__hint span {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.qtv-settings__field {
-  display: grid;
-  gap: 8px;
-}
-
-.qtv-settings__field > span {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.qtv-settings__field-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.qtv-settings__tag {
-  display: inline-flex;
-  align-items: center;
-  height: 18px;
-  padding: 0 8px;
-  border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--warning) 14%, var(--surface));
-  color: #b45309;
-  font-size: 11px;
-  font-weight: 500;
-}
-
-.qtv-settings__field small {
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.5;
 }
 </style>

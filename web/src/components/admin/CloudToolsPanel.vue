@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { getApiErrorMessage } from "@/api/client";
 import {
   cloudToolsApi,
@@ -10,12 +10,14 @@ import { toast } from "@/composables/useToast";
 import { useSettingsLoad } from "@/composables/useSettingsLoad";
 import AppButton from "@/components/base/AppButton.vue";
 import AIToolCard from "@/components/admin/AIToolCard.vue";
+import ClassificationToolCard from "@/components/admin/ClassificationToolCard.vue";
+import CleanupToolCard from "@/components/admin/CleanupToolCard.vue";
+import CoverExtractToolCard from "@/components/admin/CoverExtractToolCard.vue";
 import CloudToolCard from "@/components/admin/CloudToolCard.vue";
 import EventSyncToolCard from "@/components/admin/EventSyncToolCard.vue";
 import LocalUploadToolCard from "@/components/admin/LocalUploadToolCard.vue";
 import ProxyToolsPanel from "@/components/admin/ProxyToolsPanel.vue";
 import QuarkTVToolCard from "@/components/admin/QuarkTVToolCard.vue";
-import "@/styles/admin-shared.css";
 
 const props = withDefaults(defineProps<{ searchOpen?: boolean }>(), { searchOpen: false });
 const emit = defineEmits<{ "update:searchOpen": [boolean] }>();
@@ -23,7 +25,8 @@ const emit = defineEmits<{ "update:searchOpen": [boolean] }>();
 const { runLoad } = useSettingsLoad();
 
 const searchQuery = ref("");
-const cardTitles = ["Emby 反代", "飞牛影视反代", "115 网盘 STRM 增强方案", "115 事件同步", "从服务器上传", "AI 辅助增强工具", "夸克 STRM 播放接管"];
+const searchInputRef = ref<HTMLInputElement | null>(null);
+const cardTitles = ["Emby 反代", "飞牛影视反代", "115 STRM 增强", "115 事件同步", "夸克 STRM 接管", "AI 辅助识别", "目录整理分类", "从服务器上传", "垃圾清理工具", "视频海报生成"];
 
 function matches(title: string) {
   const q = searchQuery.value.trim().toLowerCase();
@@ -39,6 +42,18 @@ function closeSearch() {
   searchQuery.value = "";
   emit("update:searchOpen", false);
 }
+
+watch(
+  () => props.searchOpen,
+  async (open) => {
+    if (open) {
+      await nextTick();
+      searchInputRef.value?.focus();
+    } else {
+      searchQuery.value = "";
+    }
+  },
+);
 
 const status = ref<CloudTool115Status>({ enabled: false, cache_count: 0, available: false });
 const saving = ref(false);
@@ -102,23 +117,20 @@ async function clearCache() {
     <div v-if="searchOpen" class="tool-search">
       <div class="tool-search__mask" @click="closeSearch" />
       <div class="tool-search__box">
-        <input v-model="searchQuery" autofocus placeholder="搜索工具，如：飞牛、Emby、反代" @keydown.esc="closeSearch" />
+        <input ref="searchInputRef" v-model="searchQuery" placeholder="搜索工具，如：飞牛、Emby、反代" @keydown.esc="closeSearch" />
         <button type="button" @click="closeSearch">×</button>
       </div>
     </div>
     <div class="cloud-tools__grid">
       <ProxyToolsPanel :search-query="searchQuery" />
       <CloudToolCard
-        v-show="matches('115 网盘 STRM 增强方案')"
+        v-show="matches('115 STRM 增强')"
         :enabled="status.enabled"
-        name="115 网盘 STRM 增强方案"
-        driver="作用于 STRM 任务 · 全量清单 + 增量对账"
+        name="115 STRM 增强"
+        driver="115Open · STRM 全量清单扫描"
         logo-src="/logos/115.png"
         logo-alt="115"
-        :tags="[
-          { label: '115Open' },
-          { label: '实验性', variant: 'warn' },
-        ]"
+        :tags="[{ label: '实验性', variant: 'warn' }]"
         :stat-value="status.cache_count.toLocaleString('zh-CN')"
         stat-label="条路径映射关系"
       >
@@ -127,7 +139,7 @@ async function clearCache() {
             class="check-toggle"
             type="button"
             :class="{ on: status.enabled }"
-            :aria-label="status.enabled ? '停用 115 网盘 STRM 增强' : '启用 115 网盘 STRM 增强'"
+            :aria-label="status.enabled ? '停用 115 STRM 增强' : '启用 115 STRM 增强'"
             :disabled="saving || !status.available"
             title="启用 / 停用"
             @click="toggleEnabled"
@@ -144,22 +156,27 @@ async function clearCache() {
             </svg>
           </button>
         </template>
-        开启后，<code>115Open</code> 账号的 STRM 任务扫描更快：一次性获取整个目录的文件清单，
-        不用一层层翻目录，请求更少、更不容易触发限制。分支的任务仍按分支的方式执行。
+        使用全量清单扫描方式，减少逐层目录请求，减少网盘风控几率，还可加速 STRM 生成。
         <template #actions>
-          <AppButton variant="danger" :disabled="clearing" @click="clearCache">
-            {{ clearing ? "清空中…" : "清空映射数据" }}
+          <AppButton size="sm" variant="danger" :disabled="clearing" @click="clearCache">
+            {{ clearing ? "清空中…" : "清空映射" }}
           </AppButton>
         </template>
       </CloudToolCard>
 
       <EventSyncToolCard :search-query="searchQuery" />
 
-      <LocalUploadToolCard :search-query="searchQuery" />
+      <QuarkTVToolCard :search-query="searchQuery" />
 
       <AIToolCard :search-query="searchQuery" />
 
-      <QuarkTVToolCard :search-query="searchQuery" />
+      <ClassificationToolCard :search-query="searchQuery" />
+
+      <LocalUploadToolCard :search-query="searchQuery" />
+
+      <CleanupToolCard :search-query="searchQuery" />
+
+      <CoverExtractToolCard :search-query="searchQuery" />
     </div>
     <div v-if="searchOpen && !hasMatch" class="tool-search__empty">没有找到相关工具</div>
   </div>
@@ -218,8 +235,9 @@ async function clearCache() {
 
 .cloud-tools__grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  align-items: start;
+  gap: 16px;
 }
 
 .check-toggle {

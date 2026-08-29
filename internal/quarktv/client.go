@@ -46,6 +46,10 @@ type Client struct {
 	http *http.Client
 	log  *slog.Logger
 
+	// apiBase / codeBase 默认为 apiURL / codeAPI，测试可注入 mock 地址。
+	apiBase  string
+	codeBase string
+
 	mu             sync.Mutex
 	deviceID       string
 	queryToken     string
@@ -61,6 +65,8 @@ func NewClient(deviceID, refreshToken, accessToken string, tokenExpiresAt time.T
 	}
 	return &Client{
 		http:           httpx.NewClient(httpx.ClientOptions{Timeout: 30 * time.Second}),
+		apiBase:        apiURL,
+		codeBase:       codeAPI,
 		deviceID:       deviceID,
 		refreshToken:   refreshToken,
 		accessToken:    accessToken,
@@ -160,7 +166,7 @@ func (c *Client) do(ctx context.Context, method, pathname string, extra url.Valu
 
 func (c *Client) doOnce(ctx context.Context, method, pathname string, extra url.Values, out any, retried bool) ([]byte, error) {
 	q, tm, token := c.baseQuery(method, pathname, extra)
-	req, err := http.NewRequestWithContext(ctx, method, apiURL+pathname, nil)
+	req, err := http.NewRequestWithContext(ctx, method, c.apiBase+pathname, nil)
 	if err != nil {
 		return nil, domain.Wrap(domain.CodeInternal, err)
 	}
@@ -183,24 +189,32 @@ func (c *Client) doOnce(ctx context.Context, method, pathname string, extra url.
 		return nil, domain.Errorf(domain.CodeDriverError, "二维码等待用户确认")
 	}
 
-	if resp.StatusCode >= http.StatusBadRequest {
-		c.logError("夸克 TV 接口请求失败", method, pathname, resp.StatusCode, body)
-		return nil, domain.Errorf(domain.CodeDriverError, "夸克 TV 接口请求失败：HTTP %d", resp.StatusCode)
-	}
-
+	// 先处理 token 失效：夸克 TV 的 Access Token 失效响应是 HTTP 400 + errno 11001/10001，
+	// 必须放在 400 分支之前，否则刷新保护永远走不到（形同虚设）。
 	if !retried && c.tokenInvalid(env) && c.hasRefreshToken() {
 		if err := c.refresh(ctx); err != nil {
 			return nil, err
 		}
 		return c.doOnce(ctx, method, pathname, extra, out, true)
 	}
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		c.logError("夸克 TV 接口请求失败", method, pathname, resp.StatusCode, body)
+		msg := parseQuarkTVHTTPErrorMessage(body)
+		if msg != "" {
+			return nil, domain.Errorf(domain.CodeDriverError, "%s", msg)
+		}
+		return nil, domain.Errorf(domain.CodeDriverError, "夸克 TV 接口请求失败：HTTP %d", resp.StatusCode)
+	}
+
 	if env.Status >= 400 || env.Errno != 0 {
 		msg := strings.TrimSpace(env.ErrorInfo)
 		if msg == "" {
 			msg = "夸克 TV 接口返回错误"
 		}
+		msg = normalizeQuarkTVBindErrorMessage(msg)
 		c.logError("夸克 TV 接口返回错误", method, pathname, env.Status, body)
-		return nil, domain.Errorf(domain.CodeDriverError, "夸克 TV 接口错误：%s", msg)
+		return nil, domain.Errorf(domain.CodeDriverError, "%s", msg)
 	}
 	if out != nil {
 		if err := json.Unmarshal(body, out); err != nil {
@@ -305,6 +319,41 @@ type tokenAuthResp struct {
 	} `json:"data"`
 }
 
+func parseQuarkTVHTTPErrorMessage(body []byte) string {
+	msg := strings.TrimSpace(string(body))
+
+	var tokenResp tokenAuthResp
+	if err := json.Unmarshal(body, &tokenResp); err == nil {
+		if dataMsg := strings.TrimSpace(tokenResp.Data.ErrorInfo); dataMsg != "" {
+			msg = dataMsg
+		} else if topMsg := strings.TrimSpace(tokenResp.Message); topMsg != "" {
+			msg = topMsg
+		}
+	}
+
+	var env errEnvelope
+	if err := json.Unmarshal(body, &env); err == nil {
+		if errInfo := strings.TrimSpace(env.ErrorInfo); errInfo != "" {
+			msg = errInfo
+		}
+	}
+
+	return normalizeQuarkTVBindErrorMessage(msg)
+}
+
+func normalizeQuarkTVBindErrorMessage(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return ""
+	}
+	lower := strings.ToLower(msg)
+	if (strings.Contains(lower, "device") && (strings.Contains(lower, "limit") || strings.Contains(lower, "full") || strings.Contains(lower, "max") || strings.Contains(lower, "exceed"))) ||
+		(strings.Contains(msg, "设备") && (strings.Contains(msg, "上限") || strings.Contains(msg, "已满") || strings.Contains(msg, "超限") || strings.Contains(msg, "超过限制") || strings.Contains(msg, "数量限制"))) {
+		return "设备数超限"
+	}
+	return msg
+}
+
 // exchangeToken 用 code（首次）或 refresh_token（续期）交换 TV 凭证。
 func (c *Client) exchangeToken(ctx context.Context, deviceID, secret string, isRefresh bool) (*tokenResult, error) {
 	_, _, reqID := c.sign(http.MethodPost, "/token")
@@ -332,7 +381,7 @@ func (c *Client) exchangeToken(ctx context.Context, deviceID, secret string, isR
 	if err != nil {
 		return nil, domain.Wrap(domain.CodeInternal, err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codeAPI+"/token", strings.NewReader(string(raw)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.codeBase+"/token", strings.NewReader(string(raw)))
 	if err != nil {
 		return nil, domain.Wrap(domain.CodeInternal, err)
 	}
@@ -346,6 +395,10 @@ func (c *Client) exchangeToken(ctx context.Context, deviceID, secret string, isR
 	}
 	if resp.StatusCode >= http.StatusBadRequest {
 		c.logError("夸克 TV 换取凭证失败", http.MethodPost, "/token", resp.StatusCode, data)
+		msg := parseQuarkTVHTTPErrorMessage(data)
+		if msg != "" {
+			return nil, domain.Errorf(domain.CodeDriverError, "%s", msg)
+		}
 		return nil, domain.Errorf(domain.CodeDriverError, "夸克 TV 换取凭证失败：HTTP %d", resp.StatusCode)
 	}
 	var out tokenAuthResp
@@ -357,8 +410,9 @@ func (c *Client) exchangeToken(ctx context.Context, deviceID, secret string, isR
 		if msg == "" {
 			msg = fmt.Sprintf("code %d", out.Code)
 		}
+		msg = normalizeQuarkTVBindErrorMessage(msg)
 		c.logError("夸克 TV 换取凭证失败", http.MethodPost, "/token", out.Code, data)
-		return nil, domain.Errorf(domain.CodeDriverError, "夸克 TV 换取凭证失败：%s", msg)
+		return nil, domain.Errorf(domain.CodeDriverError, "%s", msg)
 	}
 	if out.Data.RefreshToken == "" {
 		return nil, domain.Errorf(domain.CodeDriverError, "夸克 TV 未返回刷新凭证")
@@ -372,7 +426,8 @@ func (c *Client) exchangeToken(ctx context.Context, deviceID, secret string, isR
 
 func tokenExpiresAt(seconds int) time.Time {
 	if seconds <= 0 {
-		seconds = 7200
+		// 接口异常未返回 expires_in 时的兜底：实测夸克 TV access token 有效期为 604800s（7 天）。
+		seconds = 604800
 	}
 	return time.Now().Add(time.Duration(seconds) * time.Second)
 }
@@ -550,6 +605,21 @@ func (c *Client) streaming(ctx context.Context, fid string) (*domain.DownloadInf
 }
 
 func (c *Client) streamingWithPreference(ctx context.Context, fid string, pref StreamingPreference) (*domain.DownloadInfo, error) {
+	result, err := c.streamingResultWithPreference(ctx, fid, pref)
+	if err != nil {
+		return nil, err
+	}
+	return result.Info, nil
+}
+
+// streamingResult 保留选中档位的元数据，仅供夸克 TV 内部的播放策略判断使用。
+// 不把 Format 塞进全驱动共用的 domain.DownloadInfo，避免单驱动细节污染公共层。
+type streamingResult struct {
+	Info   *domain.DownloadInfo
+	Format string
+}
+
+func (c *Client) streamingResultWithPreference(ctx context.Context, fid string, pref StreamingPreference) (*streamingResult, error) {
 	var out streamingResp
 	if err := c.do(ctx, http.MethodGet, "/file", url.Values{
 		"method":     {"streaming"},
@@ -561,28 +631,33 @@ func (c *Client) streamingWithPreference(ctx context.Context, fid string, pref S
 		return nil, err
 	}
 
-	info, ok := pickStreamingCandidate(fid, out.Data.VideoInfo, pref, c.log)
+	info, ok := pickStreamingCandidate(fid, out.Data.VideoInfo, pref)
 	if !ok {
 		return nil, domain.Errorf(domain.CodeDriverError, "夸克 TV 未返回符合播放偏好的档位")
 	}
+	// 直链 URL 含 auth_key/token 签名，属敏感信息，不进日志；档位摘要放 Debug 供排查。
 	if c.log != nil {
-		c.log.Info("夸克 TV 播放直链解析",
+		c.log.Debug("夸克 TV 播放直链解析",
 			"fid", fid,
 			"resolution", info.Resolution,
 			"format", info.Format,
-			"url", httpx.Truncate([]byte(info.URL), 600),
 		)
 	}
-	return &domain.DownloadInfo{
-		URL:        info.URL,
-		Mode:       domain.DownloadRedirect,
-		Expiration: downloadTTL,
+	return &streamingResult{
+		Info: &domain.DownloadInfo{
+			URL:        info.URL,
+			Mode:       domain.DownloadRedirect,
+			Expiration: downloadTTL,
+		},
+		Format: strings.ToLower(strings.TrimSpace(info.Format)),
 	}, nil
 }
 
-func pickStreamingCandidate(fid string, infos []streamingVideoInfo, pref StreamingPreference, log *slog.Logger) (streamingVideoInfo, bool) {
+func pickStreamingCandidate(fid string, infos []streamingVideoInfo, pref StreamingPreference) (streamingVideoInfo, bool) {
 	preferred := domain.NormalizeQuarkTVResolution(pref.PreferredResolution)
-	best, bestScore := -1, -1
+	// bestScore 用最小整数而不是 -1：m3u8 档位因避让 HLS 扣 1000 分后为负，
+	// 若片源只有 m3u8 档位（无 mp4），负分也要能兜底选中最高档，否则报"无符合档位"。
+	best, bestScore := -1, int(^uint(0)>>1)*-1-1
 	for i, info := range infos {
 		if strings.TrimSpace(info.URL) == "" {
 			continue
@@ -593,18 +668,6 @@ func pickStreamingCandidate(fid string, infos []streamingVideoInfo, pref Streami
 		}
 		if score > bestScore {
 			best, bestScore = i, score
-		}
-		if log != nil {
-			log.Info("夸克 TV 播放档位",
-				"fid", fid,
-				"resolution", info.Resolution,
-				"accessable", info.Accessable,
-				"trans_status", info.TransStatus,
-				"format", info.Format,
-				"width", info.Width,
-				"height", info.Height,
-				"size", info.Size,
-			)
 		}
 	}
 	if best < 0 {

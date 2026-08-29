@@ -421,6 +421,66 @@ func TestMarkNormalClearsPending(t *testing.T) {
 	}
 }
 
+func TestManualCompleteSkipsUnmatchedWork(t *testing.T) {
+	root := t.TempDir()
+	show := filepath.Join(root, "自制短剧")
+	mustMkdir(t, show)
+	mustWrite(t, filepath.Join(show, "S01E01.strm"), "x")
+	works, err := scanWorks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := works[0]
+	if err := writeManualComplete(g, MediaTypeTV); err != nil {
+		t.Fatal(err)
+	}
+	if workNeedsScrape(g, MediaTypeTV) {
+		t.Fatal("手动完成的未匹配作品不应再次进入自动刮削")
+	}
+	item := buildItem(1, root, g)
+	if item.Status != ItemStatusOK || !item.ManualDone || item.TVState != TVStateEnded || item.TMDBID != "" {
+		t.Fatalf("手动完成状态错误：%+v", item)
+	}
+}
+
+func TestClearScrapedMetadataByType(t *testing.T) {
+	root := t.TempDir()
+	show := filepath.Join(root, "错误匹配")
+	mustMkdir(t, show)
+	strmPath := filepath.Join(show, "S01E01.strm")
+	ownedNFO := filepath.Join(show, "tvshow.nfo")
+	ownedPoster := filepath.Join(show, "poster.jpg")
+	userPoster := filepath.Join(show, "fanart.jpg")
+	subtitle := filepath.Join(show, "S01E01.srt")
+	for path, body := range map[string]string{
+		strmPath:    "x",
+		ownedNFO:    "nfo",
+		ownedPoster: "poster",
+		userPoster:  "user",
+		subtitle:    "sub",
+	} {
+		mustWrite(t, path, body)
+	}
+	works, err := scanWorks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := works[0]
+	if err := clearScrapedMetadata(g); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{ownedNFO, ownedPoster, userPoster} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("元数据未清理：%s", path)
+		}
+	}
+	for _, path := range []string{strmPath, subtitle} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("非元数据不应被清理：%s: %v", path, err)
+		}
+	}
+}
+
 func TestFinalizeKeepsPendingWhenLocalExceedsTMDB(t *testing.T) {
 	root := t.TempDir()
 	show := filepath.Join(root, "短剧")

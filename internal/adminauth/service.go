@@ -30,12 +30,14 @@ const (
 	KeyPublicIndexEnabled         = "public_index_enabled"
 	KeyWebDAVEnabled              = "webdav_enabled"
 	KeyIndexAccountSwitchMode     = "index_account_switch_mode"
+	KeyCompactHomeEnabled         = "compact_home_enabled"
 	KeyAdminHomeReturnMode        = "admin_home_return_mode"
 	KeyHeaderEffectsEnabled       = "header_effects_enabled"
 	KeyIndexStrmAutoDetectEnabled = "index_strm_auto_detect_enabled"
 	KeyAdminTempPasswordHash      = "admin_temp_password_hash"
 	KeyAdminTempPasswordExpiresAt = "admin_temp_password_expires_at"
 	KeyAdminTempPasswordLastReset = "admin_temp_password_last_reset_at"
+	KeyAdminSessionGeneration     = "admin_session_generation"
 )
 
 var passwordChangeExemptPaths = map[string]struct{}{
@@ -47,6 +49,7 @@ var passwordChangeExemptPaths = map[string]struct{}{
 type Session struct {
 	IsAdmin              bool   `json:"is_admin"`
 	Username             string `json:"username"`
+	Generation           string `json:"generation,omitempty"`
 	MustChangePassword   bool   `json:"must_change_password"`
 	PasswordChangeReason string `json:"password_change_reason"`
 	CreatedAt            string `json:"created_at"`
@@ -73,6 +76,7 @@ type SystemConfig struct {
 	SessionTimeout             float64 `json:"session_timeout"`
 	PublicIndexEnabled         bool    `json:"public_index_enabled"`
 	IndexAccountSwitchMode     string  `json:"index_account_switch_mode"`
+	CompactHomeEnabled         bool    `json:"compact_home_enabled"`
 	AdminHomeReturnMode        string  `json:"admin_home_return_mode"`
 	HeaderEffectsEnabled       bool    `json:"header_effects_enabled"`
 	IndexStrmAutoDetectEnabled bool    `json:"index_strm_auto_detect_enabled"`
@@ -95,6 +99,7 @@ type UpdateCredentialsRequest struct {
 	SessionTimeout             *float64 `json:"session_timeout"`
 	PublicIndexEnabled         *bool    `json:"public_index_enabled"`
 	IndexAccountSwitchMode     *string  `json:"index_account_switch_mode"`
+	CompactHomeEnabled         *bool    `json:"compact_home_enabled"`
 	AdminHomeReturnMode        *string  `json:"admin_home_return_mode"`
 	HeaderEffectsEnabled       *bool    `json:"header_effects_enabled"`
 	IndexStrmAutoDetectEnabled *bool    `json:"index_strm_auto_detect_enabled"`
@@ -142,6 +147,9 @@ func (s *Service) ReadSession(r *http.Request) (*Session, bool) {
 	if !sess.IsAdmin {
 		return nil, false
 	}
+	if generation := s.configString(r.Context(), KeyAdminSessionGeneration, ""); generation != "" && sess.Generation != generation {
+		return nil, false
+	}
 	if !sess.Remember {
 		created, err := time.Parse(time.RFC3339, sess.CreatedAt)
 		if err != nil {
@@ -160,6 +168,7 @@ func (s *Service) WriteSession(w http.ResponseWriter, r *http.Request, sess Sess
 		sess.CreatedAt = time.Now().Format(time.RFC3339)
 	}
 	sess.Remember = remember
+	sess.Generation = s.configString(r.Context(), KeyAdminSessionGeneration, "")
 	raw, err := json.Marshal(sess)
 	if err != nil {
 		return err
@@ -320,13 +329,42 @@ func (s *Service) EnsureAdminAccess(ctx context.Context, r *http.Request, sess *
 		return nil
 	}
 	state := s.credentialState(ctx)
+	reason := state.PasswordChangeReason
+	if sess.PasswordChangeReason != "" {
+		reason = sess.PasswordChangeReason
+	}
+	if passwordChangeBootstrapRestoreAllowed(r, reason) {
+		return nil
+	}
 	if sess.MustChangePassword {
-		return domain.Errorf(domain.CodePermissionDenied, "当前会话使用临时密码登录，请先到系统设置修改管理员密码")
+		if reason == "temporary_password" {
+			return domain.Errorf(domain.CodePermissionDenied, "当前会话使用临时密码登录，请先到系统设置修改管理员密码")
+		}
+		return domain.Errorf(domain.CodePermissionDenied, "检测到管理员密码处于非安全状态，请先到系统设置修改密码")
 	}
 	if state.MustChangePassword {
 		return domain.Errorf(domain.CodePermissionDenied, "检测到管理员密码处于非安全状态，请先到系统设置修改密码")
 	}
 	return nil
+}
+
+// passwordChangeBootstrapRestoreAllowed 只为首次使用默认账号的恢复流程开放最小写接口。
+// 临时密码会话不能借此绕过强制改密，备份列表及其他后台能力也保持锁定。
+func passwordChangeBootstrapRestoreAllowed(r *http.Request, reason string) bool {
+	if r == nil || reason != "default_credentials" || r.Method != http.MethodPost {
+		return false
+	}
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	if path == "/api/admin/backups/import" || path == "/api/admin/backups/restart" {
+		return true
+	}
+	const prefix = "/api/admin/backups/"
+	const suffix = "/restore"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return false
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	return id != "" && !strings.Contains(id, "/")
 }
 
 func (s *Service) EnsurePublicOrAdmin(ctx context.Context, r *http.Request) (*Session, error) {
@@ -347,6 +385,7 @@ func (s *Service) SystemConfig(ctx context.Context) SystemConfig {
 		SessionTimeout:             float64(s.sessionTimeout(ctx)) / 3600,
 		PublicIndexEnabled:         s.publicIndexEnabled(ctx),
 		IndexAccountSwitchMode:     s.indexAccountSwitchMode(ctx),
+		CompactHomeEnabled:         s.compactHomeEnabled(ctx),
 		AdminHomeReturnMode:        s.adminHomeReturnMode(ctx),
 		HeaderEffectsEnabled:       s.headerEffectsEnabled(ctx),
 		IndexStrmAutoDetectEnabled: s.indexStrmAutoDetectEnabled(ctx),
@@ -362,6 +401,10 @@ func (s *Service) SystemConfig(ctx context.Context) SystemConfig {
 
 func (s *Service) IndexAccountSwitchMode(ctx context.Context) string {
 	return s.indexAccountSwitchMode(ctx)
+}
+
+func (s *Service) CompactHomeEnabled(ctx context.Context) bool {
+	return s.compactHomeEnabled(ctx)
 }
 
 func (s *Service) HeaderEffectsEnabled(ctx context.Context) bool {
@@ -403,7 +446,7 @@ func (s *Service) prepareCredentialUpdates(ctx context.Context, req UpdateCreden
 	if err := validateAdminUsername(username); err != nil {
 		return "", nil, err
 	}
-	_, currentPassword := s.adminCredentials(ctx)
+	currentUsername, currentPassword := s.adminCredentials(ctx)
 	currentState := security.AssessAdminCredentialState(username, currentPassword)
 	if req.SessionTimeout != nil {
 		if *req.SessionTimeout < 0.5 || *req.SessionTimeout > 24 {
@@ -425,6 +468,9 @@ func (s *Service) prepareCredentialUpdates(ctx context.Context, req UpdateCreden
 			configUpdate{key: KeyAdminTempPasswordExpiresAt, value: "0"},
 		)
 	}
+	if password != "" || username != currentUsername {
+		updates = append(updates, configUpdate{key: KeyAdminSessionGeneration, value: randomPassword(24)})
+	}
 	if req.SessionTimeout != nil {
 		updates = append(updates, configUpdate{key: KeySessionTimeout, value: strconv.Itoa(int(*req.SessionTimeout * 3600))})
 	}
@@ -437,6 +483,9 @@ func (s *Service) prepareCredentialUpdates(ctx context.Context, req UpdateCreden
 			return "", nil, domain.Errorf(domain.CodeValidation, "账号切换方式不正确")
 		}
 		updates = append(updates, configUpdate{key: KeyIndexAccountSwitchMode, value: mode})
+	}
+	if req.CompactHomeEnabled != nil {
+		updates = append(updates, configUpdate{key: KeyCompactHomeEnabled, value: boolString(*req.CompactHomeEnabled)})
 	}
 	if req.AdminHomeReturnMode != nil {
 		mode := normalizeAdminHomeReturnMode(*req.AdminHomeReturnMode)
@@ -518,7 +567,7 @@ func (s *Service) credentialState(ctx context.Context) security.CredentialState 
 }
 
 func (s *Service) publicIndexEnabled(ctx context.Context) bool {
-	return s.configBool(ctx, KeyPublicIndexEnabled, true)
+	return s.configBool(ctx, KeyPublicIndexEnabled, false)
 }
 
 func (s *Service) webdavEnabled(ctx context.Context) bool {
@@ -539,6 +588,10 @@ func (s *Service) indexAccountSwitchMode(ctx context.Context) string {
 		return "dropdown"
 	}
 	return mode
+}
+
+func (s *Service) compactHomeEnabled(ctx context.Context) bool {
+	return s.configBool(ctx, KeyCompactHomeEnabled, false)
 }
 
 func (s *Service) adminHomeReturnMode(ctx context.Context) string {

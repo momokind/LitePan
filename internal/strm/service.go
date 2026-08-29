@@ -16,11 +16,12 @@ import (
 	"litepan/internal/file"
 	"litepan/internal/playback"
 	"litepan/internal/settings"
+	"litepan/internal/startupwait"
 )
 
 const defaultScanIntervalMinutes = 6 * 60
 
-const strmStartupDelay = 60 * time.Second
+const strmStartupDelay = 10 * time.Second
 
 // RunningAccountLister 供跨模块同账号互斥（如媒体整理）。
 type RunningAccountLister interface {
@@ -55,6 +56,8 @@ type Service struct {
 	appCtx                   context.Context
 	started                  bool
 	startupReadyAt           time.Time
+	startupGate              <-chan struct{}
+	startupPending           bool
 }
 
 type ServiceOptions struct {
@@ -121,6 +124,16 @@ func (s *Service) SetRetentionBusyChecker(checker RunningAccountLister) {
 	s.mu.Unlock()
 }
 
+// SetStartupGate 设置开机认证闸门；STRM 在首次认证巡检后再额外退避。
+func (s *Service) SetStartupGate(gate <-chan struct{}) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.startupGate = gate
+	s.mu.Unlock()
+}
+
 func (s *Service) IsTaskFileOperationBusy(taskID int64) bool {
 	if s == nil || taskID <= 0 {
 		return false
@@ -181,6 +194,9 @@ func (s *Service) StartupRemaining() int {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.startupPending {
+		return max(1, int(strmStartupDelay.Seconds()+0.999))
+	}
 	if s.startupReadyAt.IsZero() {
 		return 0
 	}
@@ -189,6 +205,20 @@ func (s *Service) StartupRemaining() int {
 		return 0
 	}
 	return int(rem.Seconds() + 0.999)
+}
+
+func (s *Service) awaitStartup(ctx context.Context) bool {
+	s.mu.Lock()
+	gate := s.startupGate
+	s.mu.Unlock()
+	if !startupwait.Ready(ctx, gate) {
+		return false
+	}
+	s.mu.Lock()
+	s.startupPending = false
+	s.startupReadyAt = time.Now().Add(strmStartupDelay)
+	s.mu.Unlock()
+	return startupwait.Delay(ctx, strmStartupDelay)
 }
 
 func (s *Service) GetRunningAccountIDs() []int64 {
@@ -239,12 +269,18 @@ func (s *Service) Start(ctx context.Context) {
 	}
 	s.started = true
 	s.appCtx = ctx
-	s.startupReadyAt = time.Now().Add(strmStartupDelay)
+	s.startupPending = s.startupGate != nil
+	if !s.startupPending {
+		s.startupReadyAt = time.Now().Add(strmStartupDelay)
+	}
 	s.mu.Unlock()
 
 	go s.recoverStaleRunningTasks(ctx)
 
 	go func() {
+		if !s.awaitStartup(ctx) {
+			return
+		}
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		s.scheduleOnce(ctx)
@@ -277,10 +313,17 @@ func (s *Service) CreateTask(ctx context.Context, task *domain.StrmTask) (*domai
 }
 
 func (s *Service) UpdateTask(ctx context.Context, id int64, task *domain.StrmTask) (*domain.StrmTask, error) {
+	releaseFiles, ok := s.TryBeginTaskFileOperation(id)
+	if !ok {
+		return nil, domain.Errorf(domain.CodeValidation, "当前任务正在进行，请停止后再修改设置")
+	}
+	defer releaseFiles()
+
 	existing, err := s.repo.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	oldTaskRelDir := TaskRelDir(existing.GroupDir, existing.OutputFolder)
 	automationManaged, err := s.IsAutomationManaged(ctx, id)
 	if err != nil {
 		return nil, err
@@ -307,13 +350,29 @@ func (s *Service) UpdateTask(ctx context.Context, id int64, task *domain.StrmTas
 		task.ScheduleMode = domain.StrmScheduleManual
 	}
 	existing.ScheduleMode = task.ScheduleMode
-	existing.Status = task.Status
-	existing.PausedReason = task.PausedReason
-	existing.ErrorMessage = task.ErrorMessage
 	norm := s.normalizeTask(*existing)
 	norm.ID = id
-	if err := s.repo.Update(ctx, &norm); err != nil {
+	newTaskRelDir := TaskRelDir(norm.GroupDir, norm.OutputFolder)
+	outputMove, err := moveTaskOutputDirectory(s.strmDir, oldTaskRelDir, newTaskRelDir)
+	if err != nil {
 		return nil, err
+	}
+	if err := s.repo.Update(ctx, &norm); err != nil {
+		if rollbackErr := outputMove.Rollback(); rollbackErr != nil {
+			return nil, domain.Errorf(
+				domain.CodeInternal,
+				"保存任务失败，且 STRM 目录回滚失败：保存错误：%v；回滚错误：%v",
+				err,
+				rollbackErr,
+			)
+		}
+		return nil, err
+	}
+	if outputMove.Changed() {
+		if cleanupErr := outputMove.CleanupOldParents(); cleanupErr != nil {
+			s.log.Warn("strm 旧分组空目录清理失败", "task_id", id, "err", cleanupErr)
+		}
+		removeStrmScrapeIndex(s.dataDir, id)
 	}
 	return s.repo.Get(ctx, id)
 }
@@ -417,6 +476,7 @@ func (s *Service) enqueueRunRetry(task *domain.StrmTask, runMode, msg string) er
 }
 
 func (s *Service) OnFileMutated(ctx context.Context, e eventbus.FileMutated) {
+	s.invalidateMutatedDirCache(ctx, e)
 	if e.Op == "move" || isMetadataSyncMutation(ctx) {
 		return
 	}

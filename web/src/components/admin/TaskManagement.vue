@@ -43,7 +43,7 @@ import AppModal from "@/components/base/AppModal.vue";
 import BusySpinner from "@/components/base/BusySpinner.vue";
 import AppSelect from "@/components/base/AppSelect.vue";
 import AppStateBlock from "@/components/base/AppStateBlock.vue";
-import TimeWheelPicker from "@/components/base/TimeWheelPicker.vue";
+import TimeWindowField from "@/components/base/TimeWindowField.vue";
 import SettingsSegment from "@/components/admin/SettingsSegment.vue";
 import SettingsHelpTooltip from "@/components/admin/SettingsHelpTooltip.vue";
 import AdminTaskTabHeader from "@/components/admin/AdminTaskTabHeader.vue";
@@ -74,6 +74,7 @@ import AdminSettingsDrawer from "@/components/admin/AdminSettingsDrawer.vue";
 import { useAccountPathLabel } from "@/composables/useAccountPathLabel";
 import { useAdminPageLoading } from "@/composables/useAdminLoadingBar";
 import { useConditionalPolling } from "@/composables/useConditionalPolling";
+import { findDustTarget, useDustRemoval } from "@/composables/useDustRemoval";
 import { liveElapsedMs, useLiveElapsedClock } from "@/composables/useLiveElapsedClock";
 import {
   applyTimeWindowFromTask,
@@ -128,6 +129,8 @@ const { accounts } = storeToRefs(accountsStore);
 const tasks = ref<StrmTask[]>([]);
 const refreshing = ref(false);
 const strmListReady = ref(false);
+const strmTaskList = ref<HTMLElement | null>(null);
+const { removeWithDust } = useDustRemoval();
 const { remainingDisplay: startupRemainingDisplay, applyStartupRemaining } = useStartupCountdown();
 
 const strmPanelDirty = ref(false);
@@ -197,7 +200,6 @@ const strmRepairResult = ref<{ ok: boolean; updated?: number; message: string } 
 const pendingCreateBody = ref<StrmTaskInput | null>(null);
 const showAdvanced = ref(false);
 const pickerOpen = ref(false);
-const timePickerVisible = ref(false);
 
 const branchDialogOpen = ref(false);
 const branchLoading = ref(false);
@@ -407,7 +409,6 @@ async function handleDrawerSave() {
 
 const { timeWindowDisplay, timePickerMode, onTimeWheelConfirm } = useTimeWindowSchedule(form, {
   allowManual: true,
-  pickerVisible: timePickerVisible,
 });
 
 const editingTask = computed(() => {
@@ -484,7 +485,7 @@ function formatLastScan(value?: string): string {
 function scanStatusVariant(task: StrmTask): AdminRunStatusVariant {
   if (isTaskScanning(task)) return "running";
   if (task.last_scan_status === "ok" || task.last_scan_status === "success") return "success";
-  if (task.last_scan_status === "failed" || task.last_scan_status === "error") return "error";
+  if (task.last_scan_status === "failed" || task.last_scan_status === "error" || task.last_scan_status === "protected") return "error";
   return "pending";
 }
 
@@ -521,6 +522,9 @@ function lastScanSummary(task: StrmTask): string {
   if (!task.last_scan) return "";
   if (task.last_scan_status === "failed" || task.last_scan_status === "error") {
     return task.error_message?.trim() || "执行失败";
+  }
+  if (task.last_scan_status === "protected") {
+    return task.error_message?.trim() || "安全保护阻止清理";
   }
   const parts: string[] = [];
   const created = Number(task.generated_count || 0);
@@ -609,6 +613,10 @@ function openCreate() {
 }
 
 function openEdit(task: StrmTask) {
+  if (isTaskScanning(task)) {
+    toast.info("当前任务正在进行，请停止后再修改设置");
+    return;
+  }
   editingId.value = task.id ?? null;
   form.name = task.name;
   form.account_id = task.account_id;
@@ -844,6 +852,7 @@ async function handleForceStop(task: StrmTask) {
 
 async function handleDelete(task: StrmTask) {
   if (!task.id) return;
+  const taskID = task.id;
   const result = await showConfirm({
     title: "删除 STRM 任务",
     message: `确定删除任务「${task.name}」吗？`,
@@ -856,8 +865,15 @@ async function handleDelete(task: StrmTask) {
   if (!result || result.action !== "confirm") return;
   const deleteStrmFiles = !!result.checked;
   try {
-    await deleteStrmTask(task.id, deleteStrmFiles);
-    tasks.value = tasks.value.filter((t) => t.id !== task.id);
+    await removeWithDust({
+      target: findDustTarget(strmTaskList.value, `strm-task-${taskID}`),
+      container: strmTaskList.value,
+      remove: async () => {
+        await deleteStrmTask(taskID, deleteStrmFiles);
+        tasks.value = tasks.value.filter((t) => t.id !== taskID);
+      },
+    });
+    syncTasksPolling();
     toast.success(deleteStrmFiles ? "任务和 STRM 文件已删除" : "任务已删除");
   } catch (e) {
     toast.error(getApiErrorMessage(e, "删除失败"));
@@ -1105,8 +1121,8 @@ watch(activeTab, (tab) => {
               <th class="strm-task-table__actions">操作</th>
             </tr>
           </thead>
-          <tbody>
-            <tr v-for="task in tasks" :key="task.id" class="strm-task-row">
+          <tbody ref="strmTaskList">
+            <tr v-for="task in tasks" :key="task.id" class="strm-task-row" :data-dust-key="`strm-task-${task.id}`">
               <td>
                 <div class="strm-task-main" :title="task.name">
                   <div class="strm-task-name">
@@ -1144,7 +1160,12 @@ watch(activeTab, (tab) => {
                       @click="handleForceStop(task)"
                     />
                     <div v-else class="strm-run-menu-wrap">
-                      <AdminTableActionBtn icon="play" title="立即执行" @click="handleRunButtonClick(task)" />
+                      <AdminTableActionBtn
+                        icon="play"
+                        title="立即执行"
+                        :no-tip="task.branch_check_enabled"
+                        @click="handleRunButtonClick(task)"
+                      />
                       <div v-if="task.branch_check_enabled" class="strm-run-menu">
                         <button type="button" @click="handleRun(task, 'full')">全部执行</button>
                         <button type="button" @click="handleRun(task, 'branch')">分支执行</button>
@@ -1245,8 +1266,7 @@ watch(activeTab, (tab) => {
 
         <div class="strm-form__row">
           <FormField label="分组目录">
-            <template #label>
-              分组目录
+            <template #help>
               <SettingsHelpTooltip title="分组目录说明">
                 <p>STRM 文件生成到哪个父文件夹下，用来把多个任务归进同一个媒体库目录。</p>
                 <p>留空 = 直接生成在 STRM 根目录；填「电影」= 生成到 /app/strm/电影/任务名/，支持多级「电影/港台」。</p>
@@ -1269,13 +1289,17 @@ watch(activeTab, (tab) => {
             <AppInput v-model="form.api_interval" type="number" min="0" max="5000" />
           </FormField>
           <FormField label="执行计划">
-            <button type="button" class="strm-time-display" @click="timePickerVisible = true">
-              <span>{{ timeWindowDisplay }}</span>
-              <svg class="strm-time-display__icon" viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="12" cy="12" r="8.5" />
-                <path d="M12 7.5v5l3.2 2" />
-              </svg>
-            </button>
+            <TimeWindowField
+              :display="timeWindowDisplay"
+              :start-time="form.time_start"
+              :end-time="form.time_end"
+              :all-day="form.time_window_mode === 'always'"
+              :allow-manual="true"
+              :mode="timePickerMode"
+              :manual-locked="Boolean(strmScheduleLockedReason)"
+              :manual-locked-reason="strmScheduleLockedReason || undefined"
+              @confirm="onTimeWheelConfirm"
+            />
           </FormField>
         </div>
 
@@ -1335,7 +1359,6 @@ watch(activeTab, (tab) => {
         </template>
 
         <div v-if="strmRepairPhase === 'idle'" class="modal-form__footer">
-          <AppButton type="button" variant="secondary" @click="closeTaskDialog">取消</AppButton>
           <AppButton type="button" variant="primary" :disabled="submitting" @click="submitTask">
             {{ submitting ? "保存中…" : "保存" }}
           </AppButton>
@@ -1513,20 +1536,6 @@ watch(activeTab, (tab) => {
       confirm-text="选择该分支"
       @close="branchPickerOpen = false"
       @resolve="onBranchFolderPicked"
-    />
-
-    <TimeWheelPicker
-      :visible="timePickerVisible"
-      :start-time="form.time_start"
-      :end-time="form.time_end"
-      :all-day="form.time_window_mode === 'always'"
-      :allow-daily="false"
-      :allow-manual="true"
-      :mode="timePickerMode"
-      :manual-locked="Boolean(strmScheduleLockedReason)"
-      :manual-locked-reason="strmScheduleLockedReason || undefined"
-      @confirm="onTimeWheelConfirm"
-      @cancel="timePickerVisible = false"
     />
   </div>
 </template>
@@ -1816,45 +1825,6 @@ watch(activeTab, (tab) => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-}
-
-.strm-time-display {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  width: 100%;
-  min-height: 40px;
-  padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 14px;
-  cursor: pointer;
-  box-sizing: border-box;
-  transition: border-color 0.2s;
-}
-
-.strm-time-display:hover {
-  border-color: var(--brand);
-}
-
-.strm-time-display__icon {
-  width: 16px;
-  height: 16px;
-  color: var(--text-muted);
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  transition: color 0.2s;
-  flex-shrink: 0;
-}
-
-.strm-time-display:hover .strm-time-display__icon {
-  color: var(--brand);
 }
 
 .strm-advanced-toggle {

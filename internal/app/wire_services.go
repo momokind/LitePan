@@ -8,6 +8,7 @@ import (
 	"litepan/internal/aiorganize"
 	"litepan/internal/automation"
 	"litepan/internal/cacheretention"
+	"litepan/internal/classifyorganize"
 	"litepan/internal/config"
 	"litepan/internal/crosstransfer"
 	"litepan/internal/domain"
@@ -39,6 +40,7 @@ type servicesBundle struct {
 	strm             *strm.Service
 	mediaOrganize    *mediaorganize.Service
 	aiOrganize       *aiorganize.Service
+	classifyOrganize *classifyorganize.Service
 	strmScrape       *strmscrape.Service
 	automation       *automation.Service
 	fuse             *fusemount.Service
@@ -53,6 +55,10 @@ type servicesBundle struct {
 }
 
 func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *coreBundle) *servicesBundle {
+	var startupGate <-chan struct{}
+	if core != nil && core.sched != nil {
+		startupGate = core.sched.StartupReady()
+	}
 	favoritesSvc := favorites.NewService(cfg.DBPath, logs.For(logx.ModuleSystem))
 	fileSvc := file.NewService(core.exec, core.cache, st.store.Accounts, core.bus, st.settings, core.listHits)
 	fileSvc.SetLogger(logs.For(logx.ModuleFileOp))
@@ -61,7 +67,8 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	core.strm = coord
 	retentionSvc, retentionCoord := wireCacheRetention(st, fileSvc, core.cache, core.bus, logs)
 	aiOrganizeSvc := aiorganize.New(st.settings)
-	mediaOrganizeSvc := wireMediaOrganize(st, fileSvc, logs, cfg.DataDir, aiOrganizeSvc)
+	classifyOrganizeSvc := classifyorganize.New(st.settings)
+	mediaOrganizeSvc := wireMediaOrganize(st, fileSvc, logs, cfg.DataDir, aiOrganizeSvc, classifyOrganizeSvc)
 	strmScrapeSvc := strmscrape.New(strmscrape.Options{
 		Strm:     strmSvc,
 		Settings: st.settings,
@@ -72,8 +79,10 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	})
 	strmSvc.SetOrganizeBusyChecker(mediaOrganizeSvc)
 	strmSvc.SetRetentionBusyChecker(retentionSvc)
+	strmSvc.SetStartupGate(startupGate)
 	retentionSvc.SetStrmBusyChecker(strmSvc)
 	retentionSvc.SetOrganizeBusyChecker(mediaOrganizeSvc)
+	retentionSvc.SetStartupGate(startupGate)
 	eventMonitorSvc := eventmonitor.NewService(eventmonitor.Options{
 		Accounts:  st.store.Accounts,
 		Cursors:   st.store.EventMonitorCursors,
@@ -108,6 +117,8 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		Bus:       core.bus,
 		Log:       logs.For(logx.ModuleSystem),
 	})
+	fuseSvc.SetStartupGate(startupGate)
+	fuseSvc.Register(core.bus)
 	_ = fuseSvc.PrepareMountRoot()
 	lifecycle := &accountLifecycle{
 		fuse:      fuseSvc,
@@ -144,15 +155,16 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 	lifecycle.quarktv = quarktvSvc
 	lifecycle.eventSync = eventMonitorSvc
 	uploadSvc := upload.NewManager(upload.Options{
-		Exec:     core.exec,
-		Files:    fileSvc,
-		Playback: playbackSvc,
-		Accounts: accountSvc,
-		Repo:     st.store.UploadTasks,
-		Settings: st.settings,
-		Bus:      core.bus,
-		DataDir:  cfg.DataDir,
-		Log:      logs.For(logx.ModuleFileOp),
+		Exec:        core.exec,
+		Files:       fileSvc,
+		Playback:    playbackSvc,
+		Accounts:    accountSvc,
+		Repo:        st.store.UploadTasks,
+		Settings:    st.settings,
+		Bus:         core.bus,
+		DataDir:     cfg.DataDir,
+		Log:         logs.For(logx.ModuleFileOp),
+		StartupGate: startupGate,
 	})
 	lifecycle.uploads = uploadSvc
 	offlineDownloadSvc.SetUploads(uploadSvc)
@@ -187,6 +199,7 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		Files:      fileSvc,
 		Log:        logs.For(logx.ModuleSystem),
 	})
+	automationSvc.SetStartupGate(startupGate)
 	automationSvc.Register(core.bus)
 	strmSvc.SetAutomationManagedChecker(automationSvc.IsStrmTaskManaged)
 	return &servicesBundle{
@@ -199,6 +212,7 @@ func wireServices(cfg config.Config, logs *logx.Manager, st *storeBundle, core *
 		strm:             strmSvc,
 		mediaOrganize:    mediaOrganizeSvc,
 		aiOrganize:       aiOrganizeSvc,
+		classifyOrganize: classifyOrganizeSvc,
 		strmScrape:       strmScrapeSvc,
 		automation:       automationSvc,
 		fuse:             fuseSvc,

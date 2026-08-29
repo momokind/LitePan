@@ -104,6 +104,44 @@ func TestRedirectSTRMStreamResolvesLitePanSTRMOnServer(t *testing.T) {
 	}
 }
 
+func TestRedirectSTRMStreamMatchedClientReadsOriginalSTRM(t *testing.T) {
+	fileID := "file-direct-client"
+	litepanURL := fmt.Sprintf("https://litepan.example:8888/api/strm/play/12/%s/t/token/n/demo.mkv", strm.EncodeFileKey(fileID))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/Items") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, fmt.Sprintf(`{"Items":[{"Id":"123","MediaSources":[{"Id":"ms1","Path":%q}]}]}`, litepanURL))
+	}))
+	defer upstream.Close()
+
+	svc := testEmbyProxyService(t, upstream.URL)
+	svc.servePlayback = func(w http.ResponseWriter, r *http.Request, req playback.Request, intent playback.Intent) error {
+		t.Fatal("命中的 STRM 直读客户端不应由 LitePan 代取地址")
+		return nil
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://litepan.test:8097/Videos/123/stream?MediaSourceId=ms1&api_key=test-key", nil)
+	req.Header.Set("User-Agent", "XXXPlay/1.0")
+	req.Header.Set("Range", "bytes=0-")
+	rec := httptest.NewRecorder()
+	svc.redirectSTRMStream(rec, req, Config{EmbyURL: upstream.URL, APIKey: "test-key", DirectSTRMClients: "XXXPlay"}, strings.TrimPrefix(req.URL.RequestURI(), "/"))
+
+	resp := rec.Result()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("状态码=%d，期望 206", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(body), litepanURL+"\n"; got != want {
+		t.Fatalf("STRM 文本=%q，期望 %q", got, want)
+	}
+}
+
 func TestRedirectSTRMStreamUsesPlaybackResponseForProxyMode(t *testing.T) {
 	litepanURL := fmt.Sprintf("http://192.168.60.8:5211/api/strm/play/9/%s/t/token/n/demo.mkv", strm.EncodeFileKey("file-9"))
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,6 +177,47 @@ func TestRedirectSTRMStreamUsesPlaybackResponseForProxyMode(t *testing.T) {
 	}
 	if got := string(body); got != "proxied" {
 		t.Fatalf("响应体=%q", got)
+	}
+}
+
+func TestPlaybackInfoCacheKeepsSelectedMultiVersionSource(t *testing.T) {
+	firstURL := fmt.Sprintf("http://192.168.60.8:5211/api/strm/play/3/%s/t/token/n/1080p.mkv", strm.EncodeFileKey("file-1080p"))
+	secondURL := fmt.Sprintf("http://192.168.60.8:5211/api/strm/play/3/%s/t/token/n/2160p.mkv", strm.EncodeFileKey("file-2160p"))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/Items/2257/PlaybackInfo"):
+			_, _ = io.WriteString(w, fmt.Sprintf(`{"MediaSources":[{"Id":"mediasource_2257","Path":%q},{"Id":"mediasource_2258","Path":%q}]}`, firstURL, secondURL))
+		case strings.HasSuffix(r.URL.Path, "/Items"):
+			// Emby 的条目查询在合并版本场景下可能只返回主版本。
+			_, _ = io.WriteString(w, fmt.Sprintf(`{"Items":[{"Id":"2257","Path":%q,"MediaSources":[{"Id":"mediasource_2257","Path":%q}]}]}`, firstURL, firstURL))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	svc := testEmbyProxyService(t, upstream.URL)
+	var gotFileID string
+	svc.servePlayback = func(w http.ResponseWriter, r *http.Request, req playback.Request, intent playback.Intent) error {
+		gotFileID = req.FileID
+		w.WriteHeader(http.StatusFound)
+		return nil
+	}
+	cfg := Config{ID: "default", EmbyURL: upstream.URL, APIKey: "test-key"}
+
+	playbackReq := httptest.NewRequest(http.MethodPost, "http://litepan.test:8097/Items/2257/PlaybackInfo?api_key=test-key", nil)
+	playbackRec := httptest.NewRecorder()
+	svc.modifyPlaybackInfo(playbackRec, playbackReq, cfg, "Items/2257/PlaybackInfo")
+	if playbackRec.Code != http.StatusOK {
+		t.Fatalf("PlaybackInfo 状态码=%d，响应=%s", playbackRec.Code, playbackRec.Body.String())
+	}
+
+	streamReq := httptest.NewRequest(http.MethodGet, "http://litepan.test:8097/emby/Videos/2257/stream?MediaSourceId=mediasource_2258&api_key=test-key", nil)
+	streamRec := httptest.NewRecorder()
+	svc.redirectSTRMStream(streamRec, streamReq, cfg, strings.TrimPrefix(streamReq.URL.RequestURI(), "/"))
+	if gotFileID != "file-2160p" {
+		t.Fatalf("切换第二版本后 file_id=%q，期望 file-2160p", gotFileID)
 	}
 }
 
@@ -337,5 +416,25 @@ func TestReplaceConfigsRejectsMissingPortWhenEnabled(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "所有配置填写反代端口") {
 		t.Fatalf("缺少端口错误=%v", err)
+	}
+}
+
+func TestIsExpectedClientDisconnect(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !isExpectedClientDisconnect(canceled, context.Canceled) {
+		t.Fatal("context canceled 应识别为客户端取消")
+	}
+	for _, err := range []error{
+		fmt.Errorf("write tcp: broken pipe"),
+		fmt.Errorf("readfrom tcp: connection reset by peer"),
+		fmt.Errorf("use of closed network connection"),
+	} {
+		if !isExpectedClientDisconnect(context.Background(), err) {
+			t.Fatalf("%q 应识别为客户端取消", err)
+		}
+	}
+	if isExpectedClientDisconnect(context.Background(), fmt.Errorf("upstream returned 401")) {
+		t.Fatal("真实上游错误不应被当成客户端取消")
 	}
 }

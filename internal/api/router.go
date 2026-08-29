@@ -15,16 +15,21 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 
 	"litepan/internal/account"
 	"litepan/internal/accountprofile"
 	"litepan/internal/adminauth"
 	"litepan/internal/aiorganize"
+	"litepan/internal/announcement"
 	"litepan/internal/apikey"
 	"litepan/internal/auth"
 	"litepan/internal/automation"
+	"litepan/internal/backuprestore"
 	"litepan/internal/cache"
 	"litepan/internal/cacheretention"
+	"litepan/internal/classifyorganize"
+	"litepan/internal/coverextract"
 	"litepan/internal/crosstransfer"
 	"litepan/internal/domain"
 	"litepan/internal/embyproxy"
@@ -41,6 +46,7 @@ import (
 	"litepan/internal/quarktv"
 	"litepan/internal/settings"
 	"litepan/internal/share/dav"
+	"litepan/internal/spacecleanup"
 	"litepan/internal/strm"
 	"litepan/internal/strmscrape"
 	"litepan/internal/upload"
@@ -68,6 +74,7 @@ type Deps struct {
 	CacheRetention    *cacheretention.Service
 	MediaOrganize     *mediaorganize.Service
 	AIOrganize        *aiorganize.Service
+	ClassifyOrganize  *classifyorganize.Service
 	StrmScrape        *strmscrape.Service
 	Automation        *automation.Service
 	Fuse              *fusemount.Service
@@ -81,6 +88,10 @@ type Deps struct {
 	AuthSched         *auth.Scheduler
 	AdminAuth         *adminauth.Service
 	Notifications     *notification.Service
+	Announcement      *announcement.Service
+	BackupRestore     *backuprestore.Service
+	SpaceCleanup      *spacecleanup.Service
+	CoverExtract      *coverextract.Service
 	DataDir           string
 	StrmDir           string
 	OnSettingsUpdated func(map[string]string)
@@ -88,6 +99,7 @@ type Deps struct {
 
 // Handler 持有处理请求所需的依赖。
 type Handler struct {
+	bootID            string
 	logs              *logx.Manager
 	log               *slog.Logger
 	accountSvc        *account.Service
@@ -104,6 +116,7 @@ type Handler struct {
 	cacheRetention    *cacheretention.Service
 	mediaOrganize     *mediaorganize.Service
 	aiOrganize        *aiorganize.Service
+	classifyOrganize  *classifyorganize.Service
 	strmScrape        *strmscrape.Service
 	automation        *automation.Service
 	fuse              *fusemount.Service
@@ -117,6 +130,10 @@ type Handler struct {
 	authSched         *auth.Scheduler
 	adminAuth         *adminauth.Service
 	notifications     *notification.Service
+	announcement      *announcement.Service
+	backupRestore     *backuprestore.Service
+	spaceCleanup      *spacecleanup.Service
+	coverExtract      *coverextract.Service
 	dataDir           string
 	strmDir           string
 	onSettingsUpdated func(map[string]string)
@@ -132,6 +149,7 @@ func NewRouter(d Deps) http.Handler {
 		apiLog = d.Logs.For(logx.ModuleAPI)
 	}
 	h := &Handler{
+		bootID:            uuid.NewString(),
 		logs:              d.Logs,
 		log:               apiLog,
 		accountSvc:        d.AccountSvc,
@@ -148,6 +166,7 @@ func NewRouter(d Deps) http.Handler {
 		cacheRetention:    d.CacheRetention,
 		mediaOrganize:     d.MediaOrganize,
 		aiOrganize:        d.AIOrganize,
+		classifyOrganize:  d.ClassifyOrganize,
 		strmScrape:        d.StrmScrape,
 		automation:        d.Automation,
 		fuse:              d.Fuse,
@@ -161,6 +180,10 @@ func NewRouter(d Deps) http.Handler {
 		authSched:         d.AuthSched,
 		adminAuth:         d.AdminAuth,
 		notifications:     d.Notifications,
+		announcement:      d.Announcement,
+		backupRestore:     d.BackupRestore,
+		spaceCleanup:      d.SpaceCleanup,
+		coverExtract:      d.CoverExtract,
 		dataDir:           d.DataDir,
 		strmDir:           d.StrmDir,
 		onSettingsUpdated: d.OnSettingsUpdated,
@@ -173,6 +196,7 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(chimw.Recoverer)
 
 	r.Route("/api", func(r chi.Router) {
+		r.Get("/internal/cover-source/{token}", h.coverExtractSource)
 		r.Get("/health", h.health)
 		r.Get("/auth/status", h.authStatus)
 		r.Post("/auth/login", h.authLogin)
@@ -208,6 +232,18 @@ func NewRouter(d Deps) http.Handler {
 			r.Post("/logs/cleanup/all", h.cleanupLogsAll)
 			r.Route("/admin", func(r chi.Router) {
 				r.Get("/system-config", h.adminSystemConfig)
+				r.Route("/backups", func(r chi.Router) {
+					r.Get("/", h.listBackups)
+					r.Post("/", h.createBackup)
+					r.Post("/import", h.importBackup)
+					r.Get("/status", h.backupRestoreStatus)
+					r.Post("/status/ack", h.acknowledgeRestoreStatus)
+					r.Delete("/pending", h.cancelPendingRestore)
+					r.Post("/restart", h.restartForRestore)
+					r.Get("/{id}/download", h.downloadBackup)
+					r.Post("/{id}/restore", h.prepareBackupRestore)
+					r.Delete("/{id}", h.deleteBackup)
+				})
 				r.Post("/update-credentials", h.adminUpdateCredentials)
 				r.Post("/webdav-config", h.adminWebDAVConfig)
 				r.Get("/emby/configs", h.listEmbyConfigs)
@@ -263,6 +299,8 @@ func NewRouter(d Deps) http.Handler {
 				r.Delete("/notifications", h.deleteAllNotifications)
 				r.Post("/notifications/{id}/read", h.markNotificationRead)
 				r.Delete("/notifications/{id}", h.deleteNotification)
+				r.Get("/announcement", h.getAnnouncement)
+				r.Post("/announcement/read", h.markAnnouncementRead)
 				r.Route("/strm", func(r chi.Router) {
 					r.Get("/startup", h.strmStartupRemaining)
 					r.Get("/tasks", h.listStrmTasks)
@@ -300,6 +338,11 @@ func NewRouter(d Deps) http.Handler {
 					r.Put("/config", h.updateAIOrganizeConfig)
 					r.Post("/test", h.testAIOrganizeConfig)
 				})
+				r.Route("/tools/classification", func(r chi.Router) {
+					r.Get("/config", h.getClassificationConfig)
+					r.Put("/config", h.updateClassificationConfig)
+					r.Post("/tmdb-detail", h.lookupClassificationTMDBDetail)
+				})
 				r.Route("/tools/quarktv", func(r chi.Router) {
 					r.Get("/status", h.getQuarkTVStatus)
 					r.Post("/enabled", h.setQuarkTVEnabled)
@@ -312,6 +355,28 @@ func NewRouter(d Deps) http.Handler {
 				r.Route("/tools/115-event-sync", func(r chi.Router) {
 					r.Get("/status", h.getEventSyncStatus)
 					r.Put("/config", h.putEventSyncConfig)
+				})
+				r.Route("/tools/cleanup", func(r chi.Router) {
+					r.Post("/scan", h.scanSpaceCleanup)
+					r.Post("/execute", h.executeSpaceCleanup)
+					r.Get("/report", h.latestSpaceCleanupReport)
+				})
+				r.Route("/tools/cover-extract", func(r chi.Router) {
+					r.Put("/enabled", h.updateCoverExtractEnabled)
+					r.Get("/files", h.listCoverExtractFiles)
+					r.Post("/files", h.addCoverExtractFile)
+					r.Delete("/files", h.clearCoverExtractFiles)
+					r.Delete("/files/{id}", h.removeCoverExtractFile)
+					r.Delete("/files/{id}/frames/{frameID}", h.removeCoverFrame)
+					r.Put("/files/{id}/target", h.updateCoverExtractTarget)
+					r.Post("/extract", h.extractCoverFrames)
+					r.Get("/images/{id}", h.coverExtractImage)
+					r.Post("/save", h.saveCoverFrame)
+					r.Post("/save-composed", h.saveComposedCover)
+					r.Get("/runtime", h.coverExtractRuntime)
+					r.Post("/runtime/download", h.downloadCoverExtractRuntime)
+					r.Get("/style", h.getCoverStyle)
+					r.Put("/style", h.putCoverStyle)
 				})
 				r.Route("/media-organize", func(r chi.Router) {
 					r.Get("/tasks", h.listMediaOrganizeTasks)
@@ -339,6 +404,9 @@ func NewRouter(d Deps) http.Handler {
 				r.Route("/strm-scrape", func(r chi.Router) {
 					r.Get("/settings", h.getStrmScrapeSettings)
 					r.Put("/settings", h.updateStrmScrapeSettings)
+					r.Get("/scope", h.getStrmScrapeScope)
+					r.Put("/scope", h.updateStrmScrapeScope)
+					r.Get("/scope/directories", h.listStrmScrapeScopeDirectories)
 					r.Post("/run", h.runStrmScrape)
 					r.Post("/stop", h.stopStrmScrape)
 					r.Get("/progress", h.getStrmScrapeProgress)

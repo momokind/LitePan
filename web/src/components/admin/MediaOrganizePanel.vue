@@ -57,6 +57,7 @@ import FolderPickerModal from "@/components/file/FolderPickerModal.vue";
 import { useAccountPathLabel } from "@/composables/useAccountPathLabel";
 import { useAdminPageLoading } from "@/composables/useAdminLoadingBar";
 import { useConditionalPolling } from "@/composables/useConditionalPolling";
+import { findDustTarget, useDustRemoval } from "@/composables/useDustRemoval";
 import {
   useOrganizePlanPreview,
   planActionMeta,
@@ -129,6 +130,8 @@ const emptyForm = (): TaskForm => ({
 });
 
 const tasks = ref<MediaOrganizeTask[]>([]);
+const organizeTaskList = ref<HTMLElement | null>(null);
+const { removeWithDust } = useDustRemoval();
 const refreshing = ref(false);
 const listReady = ref(false);
 useAdminPageLoading(
@@ -254,9 +257,15 @@ async function applyMatchBinding() {
   if (!matchTarget.value || !planTaskId.value || !selectedCandidateKey.value) return;
   const hit = candidates.value.find((c) => hitKey(c) === selectedCandidateKey.value);
   if (!hit) return;
+  const selectedMediaType = hitMediaType(hit) === "tv" ? "tv" : "movie";
   matchApplying.value = true;
   try {
-    const result = await setMediaOrganizeBinding(planTaskId.value, matchTarget.value.group_uid, hitId(hit));
+    const result = await setMediaOrganizeBinding(
+      planTaskId.value,
+      matchTarget.value.group_uid,
+      hitId(hit),
+      selectedMediaType,
+    );
     closeMatch();
     if (result.plan) {
       preview.loadPlan(result.plan);
@@ -481,16 +490,25 @@ async function handleDelete(task: MediaOrganizeTask) {
     return;
   }
   try {
-    const result = await deleteMediaOrganizeTask(task.id);
-    if (result.stopping) {
-      toast.info("任务正在执行，已请求停止");
-      if (logTaskId.value === task.id) startLogPolling(task.id);
-      await loadTasks();
-      return;
-    }
+    const removed = await removeWithDust({
+      target: findDustTarget(organizeTaskList.value, `organize-task-${task.id}`),
+      container: organizeTaskList.value,
+      remove: async () => {
+        const result = await deleteMediaOrganizeTask(task.id);
+        if (result.stopping) {
+          toast.info("任务正在执行，已请求停止");
+          if (logTaskId.value === task.id) startLogPolling(task.id);
+          await loadTasks();
+          return false;
+        }
+        if (logTaskId.value === task.id) closeLogPanel();
+        tasks.value = tasks.value.filter((item) => item.id !== task.id);
+        return true;
+      },
+    });
+    if (!removed) return;
     toast.success("任务已删除");
-    if (logTaskId.value === task.id) closeLogPanel();
-    await loadTasks();
+    syncTaskListPolling();
   } catch (e) {
     toast.error(getApiErrorMessage(e, "删除失败"));
   }
@@ -893,8 +911,8 @@ defineExpose({
             <th class="admin-table__actions">操作</th>
           </tr>
         </thead>
-        <tbody>
-          <tr v-for="task in tasks" :key="task.id" class="organize-task-row">
+        <tbody ref="organizeTaskList">
+          <tr v-for="task in tasks" :key="task.id" class="organize-task-row" :data-dust-key="`organize-task-${task.id}`">
             <td>
               <div class="organize-task-main" :title="`${task.task_name} · ${accountName(task.account_id)}`">
                 <div class="organize-task-name">{{ task.task_name }}</div>
@@ -1034,18 +1052,17 @@ defineExpose({
         </div>
 
         <div v-else class="modal-form__row">
-          <div class="form-field">
-            <div class="form-field__label-row">
-              <label class="form-field__label">整理标识</label>
+          <FormField label="整理标识">
+            <template #help>
               <SettingsHelpTooltip title="整理标识说明">
                 <p>原地重命名靠它判断哪些文件已整理过，避免重复处理。</p>
                 <p><b>tmdb</b>（推荐）：文件名写入 {"{tmdb-xxxx}"} 作为标识。</p>
                 <p><b>off</b>：文件名不写入任何标识，靠规范命名结构判断。</p>
                 <p><b>自定义</b>（如 v2）：文件名写入 [v2] 作为标识。</p>
               </SettingsHelpTooltip>
-            </div>
+            </template>
             <AppInput v-model="form.rename_marker" placeholder="tmdb（推荐）/ off / 自定义如 v2" />
-          </div>
+          </FormField>
           <FormField label="媒体类型">
             <AppSelect v-model="form.media_type" :options="mediaTypeOptions" />
           </FormField>
@@ -1190,6 +1207,11 @@ defineExpose({
                 <span class="organize-plan-group-right">
                   <span class="organize-plan-group-badges">
                     <span v-if="group.aiAssisted" class="organize-plan-group-ai">AI 介入</span>
+                    <span
+                      v-if="group.classificationLabel"
+                      class="organize-plan-group-classification"
+                      :class="{ 'organize-plan-group-classification--degraded': group.classificationDegraded }"
+                    >分类：{{ group.classificationLabel }}</span>
                     <span v-if="group.tmdbId" class="organize-plan-group-tmdb">tmdb-{{ group.tmdbId }}</span>
                     <span v-else class="organize-plan-group-notmdb">无 TMDB</span>
                     <span class="organize-plan-group-count">{{ group.actionCount }} 项</span>
@@ -1407,7 +1429,6 @@ defineExpose({
           </p>
         </div>
         <div class="organize-match__foot">
-          <AppButton type="button" variant="secondary" @click="closeMatch">取消</AppButton>
           <AppButton
             type="button"
             variant="primary"
@@ -2151,6 +2172,21 @@ defineExpose({
   border-radius: 999px;
 }
 
+.organize-plan-group-classification {
+  font-size: 12px;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 11%, var(--surface));
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--success) 28%, transparent);
+  border-radius: 999px;
+}
+
+.organize-plan-group-classification--degraded {
+  color: var(--text-muted);
+  background: var(--surface-sunken);
+  border-color: var(--border);
+}
+
 .organize-plan-group-notmdb {
   font-size: 12px;
   color: var(--warning);
@@ -2425,23 +2461,5 @@ defineExpose({
   font-size: 11px;
   color: var(--warning);
   cursor: pointer;
-}
-
-.form-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.form-field__label-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.form-field__label {
-  font-size: 13px;
-  color: var(--text-regular);
-  font-weight: 500;
 }
 </style>

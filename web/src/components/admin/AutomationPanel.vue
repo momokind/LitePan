@@ -26,14 +26,14 @@
                 <th class="col-op">操作</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody ref="automationRuleList">
               <tr v-if="loading">
                 <td colspan="5" class="empty-cell">加载中...</td>
               </tr>
               <tr v-else-if="rules.length === 0">
                 <td colspan="5" class="empty-cell">还没有自动联动，点右上角「新增联动」创建第一条规则</td>
               </tr>
-              <tr v-for="rule in rules" v-else :key="rule.id" class="automation-row" :class="{ 'is-running': rule.is_running }">
+              <tr v-for="rule in rules" v-else :key="rule.id" class="automation-row" :class="{ 'is-running': rule.is_running }" :data-dust-key="`automation-rule-${rule.id}`">
                 <td>
                   <div class="rule-name">{{ rule.name }}</div>
                   <div class="rule-desc">{{ triggerLabel(rule) }}</div>
@@ -350,13 +350,14 @@
       @cancel="cancelTimePicker"
     />
 
-    <AppModal :open="pickerVisible" bare @close="cancelPicker">
-      <div class="pick-modal">
-        <div class="modal-head">
-          <div class="modal-title">{{ pickerKind === 'trigger' ? '选择触发条件' : '添加执行动作' }}</div>
-          <button class="modal-close" type="button" @click="cancelPicker"><i class="fas fa-times"></i></button>
-        </div>
-        <div class="modal-group">{{ pickerKind === 'trigger' ? '什么时候启动这条联动' : '这一步要执行什么' }}</div>
+    <AppPlainModal
+      :open="pickerVisible"
+      :title="pickerKind === 'trigger' ? '选择触发条件' : '添加执行动作'"
+      size="sm"
+      body-flush
+      @close="cancelPicker"
+    >
+      <div class="automation-scope">
         <div v-if="pickerKind === 'trigger'" class="pick-list">
           <button class="pick-option" type="button" @click="chooseTrigger('daily')">
             <span class="pick-ico trigger"><i class="fas fa-clock"></i></span>
@@ -402,15 +403,10 @@
           </button>
         </div>
       </div>
-    </AppModal>
+    </AppPlainModal>
 
-    <AppModal :open="configVisible" bare @close="closeConfig">
-      <div class="config-modal">
-        <div class="modal-head">
-          <div class="modal-title">{{ configTitle }}</div>
-          <button class="modal-close" type="button" @click="closeConfig"><i class="fas fa-times"></i></button>
-        </div>
-
+    <AppPlainModal :open="configVisible" :title="configTitle" size="sm" body-flush @close="closeConfig">
+      <div class="automation-scope">
         <div v-if="configMode === 'trigger'" class="cfg-body">
           <template v-if="form.trigger_type === 'external_event'">
             <div class="cfg-row">
@@ -530,13 +526,12 @@
             </div>
           </template>
         </div>
-
-        <div class="modal-actions">
-          <AppButton type="button" variant="cancel" @click="closeConfig">取消</AppButton>
-          <AppButton type="button" variant="primary" :disabled="!configCanApply" @click="applyConfig">确定</AppButton>
-        </div>
       </div>
-    </AppModal>
+
+      <template #footer>
+        <AppButton type="button" variant="primary" :disabled="!configCanApply" @click="applyConfig">确定</AppButton>
+      </template>
+    </AppPlainModal>
 
     <FolderPickerModal
       :open="offlineFolderPickerVisible"
@@ -567,6 +562,7 @@ import {
 import AppButton from '@/components/base/AppButton.vue'
 import AppBadge from '@/components/base/AppBadge.vue'
 import AppModal from '@/components/base/AppModal.vue'
+import AppPlainModal from '@/components/base/AppPlainModal.vue'
 import AppSelect from '@/components/base/AppSelect.vue'
 import FolderPickerModal from '@/components/file/FolderPickerModal.vue'
 import AdminEnableToggle from '@/components/admin/AdminEnableToggle.vue'
@@ -575,6 +571,7 @@ import AdminRunStatusCell from '@/components/admin/AdminRunStatusCell.vue'
 import AdminTableActionBtn from '@/components/admin/AdminTableActionBtn.vue'
 import TimeWheelPicker from '../base/TimeWheelPicker.vue'
 import { confirm } from '../../composables/useConfirm'
+import { findDustTarget, useDustRemoval } from '../../composables/useDustRemoval'
 import { toast } from '../../composables/useToast'
 import { getApiErrorMessage } from '../../api/client'
 import { accountsApi } from '../../api/accounts'
@@ -601,6 +598,8 @@ const loading = ref(false)
 const saving = ref(false)
 const editingRule = ref(null)
 const rules = ref([])
+const automationRuleList = ref(null)
+const { removeWithDust } = useDustRemoval()
 const runs = ref([])
 const expandedRunIds = ref(new Set())
 const runsDrawerVisible = ref(false)
@@ -695,7 +694,7 @@ const ACTION_DEFINITIONS = {
     label: '生成本地STRM元数据',
     optionLabel: '生成本地STRM元数据',
     icon: 'fas fa-images',
-    desc: '对该 STRM 任务输出目录执行本地元数据刮削（nfo / 海报）',
+    desc: '对该 STRM 任务执行本地元数据刮削',
     normalize: params => ({
       task_id: params.task_id ? Number(params.task_id) : '',
       write_mode: params.write_mode === 'overwrite' ? 'overwrite' : 'missing_only',
@@ -1610,9 +1609,17 @@ const deleteRule = async (rule) => {
       danger: true,
       icon: 'trash'
     })
-    await deleteAutomationRule(rule.id)
+    await removeWithDust({
+      target: findDustTarget(automationRuleList.value, `automation-rule-${rule.id}`),
+      container: automationRuleList.value,
+      remove: async () => {
+        await deleteAutomationRule(rule.id)
+        rules.value = rules.value.filter(item => item.id !== rule.id)
+        runs.value = runs.value.filter(item => item.rule_id !== rule.id)
+      }
+    })
     toast.success('自动联动已删除')
-    await loadAll()
+    scheduleCenterRunningFlowSteps('auto')
   } catch (error) {
     if (error?.message !== 'Modal closed') {
       toast.error('删除失败: ' + getApiErrorMessage(error, '请稍后重试'))
@@ -2762,15 +2769,6 @@ defineExpose({
   font-size: 14px;
 }
 
-.readonly-ctrl {
-  display: flex;
-  align-items: center;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .time-btn {
   display: inline-flex;
   align-items: center;
@@ -3061,8 +3059,7 @@ defineExpose({
   }
 }
 
-.pick-modal,
-.config-modal {
+.automation-scope {
   --panel: var(--surface);
   --soft: var(--surface-sunken);
   --line: var(--border);
@@ -3072,53 +3069,6 @@ defineExpose({
   --blue: var(--brand);
   --ok: var(--success);
   --warn: var(--warning);
-  width: min(460px, calc(100vw - 40px));
-  max-height: 84vh;
-  border-radius: 18px;
-  background: var(--panel);
-  box-shadow: var(--shadow-pop);
-}
-
-.pick-modal {
-  overflow: auto;
-}
-
-.config-modal {
-  display: flex;
-  flex-direction: column;
-  width: min(520px, calc(100vw - 40px));
-  overflow: hidden;
-}
-
-.modal-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 18px 20px 12px;
-}
-
-.modal-title {
-  color: var(--ink);
-  font-size: 16px;
-  font-weight: 800;
-}
-
-.modal-close {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--muted2);
-  cursor: pointer;
-}
-
-.modal-close:hover {
-  background: var(--soft);
-  color: var(--ink);
 }
 
 .modal-group {
@@ -3290,16 +3240,6 @@ defineExpose({
   word-break: break-all;
 }
 
-.modal-actions {
-  display: flex;
-  flex-shrink: 0;
-  justify-content: flex-end;
-  gap: 10px;
-  padding: 14px 20px 18px;
-  border-top: 1px solid var(--line);
-  background: var(--soft);
-}
-
 @media (max-width: 1120px) {
   .builder-grid {
     grid-template-columns: 1fr;
@@ -3307,6 +3247,18 @@ defineExpose({
 
   .rail {
     position: static;
+  }
+}
+
+@media (max-width: 720px) {
+  /* 手机小屏：隐藏最长的「执行流程」列，缩短横向滚动距离 */
+  .automation-table {
+    min-width: 480px;
+  }
+
+  .automation-table .col-flow,
+  .automation-row .flow-cell {
+    display: none;
   }
 }
 

@@ -20,9 +20,10 @@ type Query = Record<string, string | number | boolean | undefined>;
 interface RequestOptions {
   query?: Query;
   body?: unknown;
-  form?: URLSearchParams;
+  form?: URLSearchParams | FormData;
   skipAuthRedirect?: boolean;
   signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 function buildURL(path: string, query?: Query): string {
@@ -60,7 +61,7 @@ async function request<T>(method: string, path: string, opts: RequestOptions = {
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, defaultRequestTimeoutMs);
+  }, opts.timeoutMs ?? defaultRequestTimeoutMs);
   const onAbort = () => {
     cancelled = true;
     controller.abort();
@@ -129,9 +130,11 @@ export const http = {
   get: <T>(path: string, query?: Query) => request<T>("GET", path, { query }),
   post: <T>(path: string, body?: unknown, query?: Query, signal?: AbortSignal) =>
     request<T>("POST", path, { body, query, signal }),
+  postWithTimeout: <T>(path: string, body: unknown, timeoutMs: number, signal?: AbortSignal) =>
+    request<T>("POST", path, { body, signal, timeoutMs }),
   put: <T>(path: string, body?: unknown) => request<T>("PUT", path, { body }),
   del: <T>(path: string, body?: unknown, query?: Query) =>
     request<T>("DELETE", path, { body, query }),
-  form: <T>(path: string, form: URLSearchParams) =>
+  form: <T>(path: string, form: URLSearchParams | FormData) =>
     request<T>("POST", path, { form, skipAuthRedirect: path.startsWith("/auth/") }),
 };

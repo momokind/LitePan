@@ -14,10 +14,22 @@ import (
 	"litepan/internal/domain"
 	"litepan/internal/driver"
 	"litepan/internal/eventbus"
+	"litepan/internal/proxybase"
 	"litepan/internal/settings"
 )
 
 const driverQuark = "quark"
+
+const (
+	PlayModeSplit    = "split"
+	PlayModeAdaptive = "adaptive"
+	PlayModeDirect   = "direct"
+)
+
+const (
+	ClientListDirect = "direct_list"
+	ClientListProxy  = "proxy_list"
+)
 
 // Service 是夸克 TV 播放接管插件的业务入口，负责绑定、身份校验与解析接管。
 type Service struct {
@@ -119,14 +131,24 @@ type BindingView struct {
 
 // Status 是卡片状态。
 type Status struct {
-	Enabled   bool          `json:"enabled"`
-	Available bool          `json:"available"`
-	Bindings  []BindingView `json:"bindings"`
+	Enabled        bool          `json:"enabled"`
+	Available      bool          `json:"available"`
+	PlayMode       string        `json:"play_mode"`
+	ClientListMode string        `json:"client_list_mode"`
+	ProxyClients   string        `json:"proxy_clients"`
+	Bindings       []BindingView `json:"bindings"`
 }
 
 // Status 汇总卡片状态。
 func (s *Service) Status(ctx context.Context) (Status, error) {
-	st := Status{Enabled: s.Enabled(), Available: s.bindings != nil, Bindings: []BindingView{}}
+	st := Status{
+		Enabled:        s.Enabled(),
+		Available:      s.bindings != nil,
+		PlayMode:       s.PlayMode(),
+		ClientListMode: s.ClientListMode(),
+		ProxyClients:   s.ProxyClients(),
+		Bindings:       []BindingView{},
+	}
 	if s.accounts == nil || s.bindings == nil {
 		return st, nil
 	}
@@ -289,6 +311,9 @@ func (s *Service) DeleteBinding(ctx context.Context, accountID int64) error {
 type BindingSettings struct {
 	PreferredResolution string `json:"preferred_resolution"`
 	AllowDolby          bool   `json:"allow_dolby"`
+	PlayMode            string `json:"play_mode"`
+	ClientListMode      string `json:"client_list_mode"`
+	ProxyClients        string `json:"proxy_clients"`
 }
 
 func (s *Service) UpdateBindingSettings(ctx context.Context, accountID int64, in BindingSettings) (*BindingView, error) {
@@ -310,6 +335,15 @@ func (s *Service) UpdateBindingSettings(ctx context.Context, accountID int64, in
 	if err := s.bindings.Upsert(ctx, b); err != nil {
 		return nil, err
 	}
+	if s.settings != nil {
+		if err := s.settings.Update(ctx, map[string]string{
+			settings.KeyQuarkTVPlayMode:       normalizePlayMode(in.PlayMode),
+			settings.KeyQuarkTVClientListMode: normalizeClientListMode(in.ClientListMode),
+			settings.KeyQuarkTVProxyClients:   proxybase.NormalizeClientKeywords(in.ProxyClients),
+		}); err != nil {
+			return nil, err
+		}
+	}
 	acc, err := s.accounts.Get(ctx, accountID)
 	if err != nil {
 		return nil, err
@@ -328,10 +362,82 @@ func (s *Service) UpdateBindingSettings(ctx context.Context, accountID int64, in
 	}, nil
 }
 
+// PlayMode 返回全局播放策略：策略分流、智能变轨或全部走 TV。
+func (s *Service) PlayMode() string {
+	if s.settings == nil {
+		return PlayModeAdaptive
+	}
+	return normalizePlayMode(s.settings.String(settings.KeyQuarkTVPlayMode))
+}
+
+func normalizePlayMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case PlayModeSplit:
+		return PlayModeSplit
+	case PlayModeDirect:
+		return PlayModeDirect
+	default:
+		return PlayModeAdaptive
+	}
+}
+
+// ClientListMode 返回策略分流中客户端名单的用途。
+func (s *Service) ClientListMode() string {
+	if s.settings == nil {
+		return ClientListProxy
+	}
+	return normalizeClientListMode(s.settings.String(settings.KeyQuarkTVClientListMode))
+}
+
+func normalizeClientListMode(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), ClientListDirect) {
+		return ClientListDirect
+	}
+	return ClientListProxy
+}
+
+func isHLSFormat(format string) bool {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "m3u8", "hls":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldBypassTVBeforeResolve(mode, listMode, clients, ua string) bool {
+	if normalizePlayMode(mode) != PlayModeSplit {
+		return false
+	}
+	matched := proxybase.MatchesClientText(clients, ua)
+	if normalizeClientListMode(listMode) == ClientListProxy {
+		return matched
+	}
+	return !matched
+}
+
+func shouldFallbackSelectedFormat(mode, format string) bool {
+	return normalizePlayMode(mode) == PlayModeAdaptive && isHLSFormat(format)
+}
+
+// ProxyClients 返回策略分流的客户端关键字列表；具体用途由 ClientListMode 决定。
+func (s *Service) ProxyClients() string {
+	if s.settings == nil {
+		return ""
+	}
+	return proxybase.NormalizeClientKeywords(s.settings.StringAllowEmpty(settings.KeyQuarkTVProxyClients))
+}
+
 // ResolveHook 是播放解析接管钩子；返回 handled=true 表示用 TV 直链替换原解析。
 // 仅接管“播放”场景（前台预览/STRM 等），WebDAV、FUSE 等字节级读取（playback=false）不接管。
+// 策略分流按 User-Agent 匹配例外客户端；智能变轨仅在选中 HLS 档位时回落；全部走 TV 不做兼容回落。
 func (s *Service) ResolveHook(ctx context.Context, accountID int64, driverType, fileID, ua string, playback bool) (*domain.DownloadInfo, bool, error) {
 	if !playback || driverType != driverQuark || !s.Enabled() || s.bindings == nil {
+		return nil, false, nil
+	}
+	mode := s.PlayMode()
+	if shouldBypassTVBeforeResolve(mode, s.ClientListMode(), s.ProxyClients(), ua) {
+		s.log.Debug("夸克 TV 策略分流回落本机代理", "account_id", accountID, "user_agent", ua, "list_mode", s.ClientListMode())
 		return nil, false, nil
 	}
 	b, err := s.bindings.Get(ctx, accountID)
@@ -341,7 +447,7 @@ func (s *Service) ResolveHook(ctx context.Context, accountID int64, driverType, 
 	client := NewClient(b.DeviceID, b.RefreshToken, b.AccessToken, b.TokenExpiresAt)
 	client.SetLogger(s.log)
 	defer client.Close()
-	info, err := client.streamingWithPreference(ctx, fileID, StreamingPreference{
+	result, err := client.streamingResultWithPreference(ctx, fileID, StreamingPreference{
 		PreferredResolution: b.PreferredResolution,
 		AllowDolby:          b.AllowDolby,
 	})
@@ -364,7 +470,11 @@ func (s *Service) ResolveHook(ctx context.Context, accountID int64, driverType, 
 			s.log.Warn("持久化夸克 TV 凭证失败", "account_id", accountID, "err", err)
 		}
 	}
-	return info, true, nil
+	if shouldFallbackSelectedFormat(mode, result.Format) {
+		s.log.Debug("夸克 TV 智能变轨命中 HLS，回落本机代理", "account_id", accountID, "file_id", fileID, "format", result.Format)
+		return nil, false, nil
+	}
+	return result.Info, true, nil
 }
 
 // notifyBindingInvalid 在夸克 TV 凭证失效时给右上角铃铛发一条通知，同一账号每次进程生命周期内只提醒一次。

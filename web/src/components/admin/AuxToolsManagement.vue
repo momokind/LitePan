@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onDeactivated, ref, watchEffect } from "vue";
+import { computed, defineAsyncComponent, nextTick, onDeactivated, reactive, ref, watch, watchEffect } from "vue";
 import { useRoute } from "vue-router";
 import AppButton from "@/components/base/AppButton.vue";
 import SectionTabBar from "@/components/admin/SectionTabBar.vue";
@@ -8,18 +8,20 @@ import type StrmScrapePanelComponent from "@/components/admin/StrmScrapePanel.vu
 import { useSectionTabRoute } from "@/composables/useSectionTabRoute";
 import { useSettingsPageDirty } from "@/composables/useSettingsPageDirty";
 import { readPanelSaving, type SettingsPanelExpose } from "@/composables/useSettingsForm";
-import "@/styles/admin-shared.css";
 
 const StrmScrapePanel = defineAsyncComponent(() => import("@/components/admin/StrmScrapePanel.vue"));
 const StrmScrapeSettings = defineAsyncComponent(() => import("@/components/admin/StrmScrapeSettings.vue"));
 const CloudToolsPanel = defineAsyncComponent(() => import("@/components/admin/CloudToolsPanel.vue"));
+const BackupRestorePanel = defineAsyncComponent(() => import("@/components/admin/BackupRestorePanel.vue"));
 
 const SCRAPE_TAB = "scrape";
 const PROXY_TAB = "proxy";
 const ENHANCED_TAB = "enhanced";
+const BACKUP_TAB = "backup";
 const tabs = [
   { key: SCRAPE_TAB, label: "STRM 刮削" },
   { key: ENHANCED_TAB, label: "增强工具" },
+  { key: BACKUP_TAB, label: "备份管理" },
 ];
 
 const settingsDrawerOpen = ref(false);
@@ -44,8 +46,8 @@ const { confirmDiscardChanges } = useSettingsPageDirty(settingsPageDirty, revert
 const route = useRoute();
 const initialTab = String(route.query.tab ?? "") === PROXY_TAB ? ENHANCED_TAB : SCRAPE_TAB;
 const { activeTab, setActiveTab } = useSectionTabRoute(
-	initialTab,
-	[SCRAPE_TAB, ENHANCED_TAB],
+  initialTab,
+  [SCRAPE_TAB, ENHANCED_TAB, BACKUP_TAB],
   {
     beforeTabChange: async () => {
       if (!settingsDrawerOpen.value) return true;
@@ -57,9 +59,21 @@ const { activeTab, setActiveTab } = useSectionTabRoute(
   },
 );
 
+// 重面板首次访问时才挂载，之后只隐藏不销毁，保留已加载状态。
+const tabsVisited = reactive<Record<string, boolean>>({});
+watch(
+  activeTab,
+  (tab) => {
+    tabsVisited[tab] = true;
+    if (tab !== ENHANCED_TAB) enhancedSearchOpen.value = false;
+  },
+  { immediate: true },
+);
+
 const drawerSaving = computed(() => readPanelSaving(scrapeSettingsRef.value?.saving));
 const isScrapeTab = computed(() => activeTab.value === SCRAPE_TAB);
 const isEnhancedTab = computed(() => activeTab.value === ENHANCED_TAB);
+const isBackupTab = computed(() => activeTab.value === BACKUP_TAB);
 
 async function openScrapeSettings() {
   scrapeSettingsVisited.value = true;
@@ -76,6 +90,7 @@ async function closeSettingsDrawer() {
 }
 
 onDeactivated(() => {
+  enhancedSearchOpen.value = false;
   if (!settingsDrawerOpen.value) return;
   if (scrapePanelDirty.value) revertDrawerSettings();
   settingsDrawerOpen.value = false;
@@ -109,12 +124,19 @@ async function handleDrawerSave() {
       </template>
     </SectionTabBar>
 
-    <StrmScrapePanel v-if="isScrapeTab" ref="scrapePanelRef" @open-settings="openScrapeSettings" />
+    <StrmScrapePanel
+      v-if="tabsVisited[SCRAPE_TAB]"
+      v-show="isScrapeTab"
+      ref="scrapePanelRef"
+      @open-settings="openScrapeSettings"
+    />
     <CloudToolsPanel
-      v-else-if="isEnhancedTab"
+      v-if="tabsVisited[ENHANCED_TAB]"
+      v-show="isEnhancedTab"
       :search-open="enhancedSearchOpen"
       @update:search-open="enhancedSearchOpen = $event"
     />
+    <BackupRestorePanel v-if="tabsVisited[BACKUP_TAB]" v-show="isBackupTab" />
 
     <AdminSettingsDrawer
       :open="settingsDrawerOpen"

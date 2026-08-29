@@ -216,6 +216,7 @@ func (s *Service) writeMatchedOpts(ctx context.Context, client *tmdb.Client, g w
 	if withTVExtras || !needTVExtras {
 		finalizeAfterScrape(g, mediaType, epTMDB, info.Doubt)
 	}
+	clearManualComplete(g)
 	return epTMDB, nil
 }
 
@@ -310,7 +311,8 @@ func finaleEpisodeNumber(detail *tmdbSeasonDetail) int {
 	return best
 }
 
-func (s *Service) writeSeasonPosters(ctx context.Context, client *tmdb.Client, showDir, tmdbID string, overwrite bool) error {
+func (s *Service) writeSeasonPosters(ctx context.Context, client *tmdb.Client, g workGroup, tmdbID string, overwrite bool) error {
+	showDir := g.absDir
 	seasons := listLocalSeasonNumbers(showDir)
 	if len(seasons) == 0 {
 		return nil
@@ -344,7 +346,7 @@ func (s *Service) writeSeasonPosters(ctx context.Context, client *tmdb.Client, s
 		if !overwrite && fileExists(out) {
 			continue
 		}
-		if err := s.writeOptionalArtwork(ctx, client, posterPath, out, fmt.Sprintf("第 %d 季海报", season)); err != nil {
+		if _, err := s.writeOptionalArtwork(ctx, client, posterPath, out, fmt.Sprintf("第 %d 季海报", season)); err != nil {
 			return err
 		}
 	}
@@ -430,5 +432,7 @@ func (s *Service) newTMDBClient() *tmdb.Client {
 		Timeout:        20 * time.Second,
 		MaxRetries:     2,
 		RetryBaseDelay: time.Second,
+		APIBaseHost:    cfg.TmdbAPIHost,
+		ImageBaseHost:  cfg.TmdbImageHost,
 	})
 }

@@ -24,13 +24,15 @@ var copyBufPool = sync.Pool{
 }
 
 type linkHolder struct {
-	svc         *Service
-	mu          sync.Mutex
-	link        domain.DownloadInfo
-	accountID   int64
-	fileID      string
-	ua          string
-	refreshLeft int
+	svc            *Service
+	mu             sync.Mutex
+	link           domain.DownloadInfo
+	accountID      int64
+	fileID         string
+	ua             string
+	playback       bool
+	skipRangeLimit bool
+	refreshLeft    int
 }
 
 func (lh *linkHolder) snapshot() domain.DownloadInfo {
@@ -50,7 +52,7 @@ func (lh *linkHolder) refreshAfterFailure(ctx context.Context, failed domain.Dow
 		return lh.link, false, nil
 	}
 	lh.refreshLeft--
-	res, err := lh.svc.Resolve(ctx, lh.accountID, lh.fileID, lh.ua, true, false)
+	res, err := lh.svc.Resolve(ctx, lh.accountID, lh.fileID, lh.ua, true, lh.playback)
 	if err != nil {
 		return lh.link, false, err
 	}
@@ -204,18 +206,28 @@ func writeAll(w io.Writer, data []byte) error {
 func (s *Service) pipeUpstreamRange(ctx context.Context, w io.Writer, lh *linkHolder, start, end int64) error {
 	link := lh.snapshot()
 	for try := 0; try < 2; try++ {
-		resp, err := s.doRangeRequest(ctx, lh.accountID, link, start, end)
+		resp, err := s.doRangeRequest(ctx, lh.accountID, link, start, end, lh.skipRangeLimit)
 		if err != nil {
+			if try == 0 && ctx.Err() == nil {
+				newLink, refreshed, rerr := lh.refreshAfterFailure(ctx, link)
+				if rerr != nil {
+					return rerr
+				}
+				if refreshed {
+					link = newLink
+					continue
+				}
+			}
 			return err
 		}
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		if shouldRefreshUpstreamStatus(resp.StatusCode) {
 			resp.Body.Close()
 			newLink, refreshed, rerr := lh.refreshAfterFailure(ctx, link)
 			if rerr != nil {
 				return rerr
 			}
 			if !refreshed {
-				return domain.Errorf(domain.CodeDriverError, "上游认证失败")
+				return domain.Errorf(domain.CodeDriverError, "上游临时地址刷新后仍不可用")
 			}
 			link = newLink
 			continue
@@ -262,6 +274,17 @@ func (s *Service) pipeUpstreamRange(ctx context.Context, w io.Writer, lh *linkHo
 	return domain.Errorf(domain.CodeDriverError, "上游 Range 数据不完整")
 }
 
+// shouldRefreshUpstreamStatus 只对可能由临时直链过期或上游短暂异常造成的状态刷新地址。
+// 其他 4xx 通常是请求本身有误，重试没有意义。
+func shouldRefreshUpstreamStatus(status int) bool {
+	return status == http.StatusUnauthorized ||
+		status == http.StatusForbidden ||
+		status == http.StatusNotFound ||
+		status == http.StatusRequestTimeout ||
+		status == http.StatusTooManyRequests ||
+		status >= http.StatusInternalServerError
+}
+
 type growBuffer struct {
 	b []byte
 }
@@ -274,7 +297,7 @@ func (g *growBuffer) Write(p []byte) (int, error) {
 func (g *growBuffer) Bytes() []byte { return g.b }
 
 func (s *Service) probeSizeViaRange0(ctx context.Context, lh *linkHolder) (int64, error) {
-	resp, err := s.doRangeRequest(ctx, lh.accountID, lh.snapshot(), 0, 0)
+	resp, err := s.doRangeRequest(ctx, lh.accountID, lh.snapshot(), 0, 0, lh.skipRangeLimit)
 	if err != nil {
 		return 0, err
 	}
@@ -305,10 +328,16 @@ func parseContentRangeTotal(v string) (int64, error) {
 	return n, nil
 }
 
-func (s *Service) doRangeRequest(ctx context.Context, accountID int64, link domain.DownloadInfo, start, end int64) (*http.Response, error) {
-	release, err := s.rangeLimits.acquire(ctx, accountID, link.Concurrency)
-	if err != nil {
-		return nil, err
+func (s *Service) doRangeRequest(ctx context.Context, accountID int64, link domain.DownloadInfo, start, end int64, skipLimit bool) (*http.Response, error) {
+	var release func()
+	if !skipLimit {
+		var err error
+		release, err = s.rangeLimits.acquire(ctx, accountID, link.Concurrency)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		release = func() {}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link.URL, nil)
 	if err != nil {

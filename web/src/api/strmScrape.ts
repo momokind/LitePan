@@ -1,4 +1,5 @@
 import { http } from "./client";
+import type { FileItem } from "./types";
 
 export type StrmScrapeWriteMode = "missing_only" | "overwrite";
 export type StrmScrapeItemStatus = "ok" | "miss" | "doubt";
@@ -21,6 +22,7 @@ export interface StrmScrapeItem {
   has_nfo: boolean;
   has_poster: boolean;
   has_pending?: boolean;
+  manual_done?: boolean;
   tmdb_id?: string;
   poster_url?: string;
   folder_name?: string;
@@ -57,6 +59,8 @@ export interface StrmScrapeSettings {
   write_mode: StrmScrapeWriteMode;
   tmdb_api_key: string;
   tmdb_language: string;
+  tmdb_api_host: string;
+  tmdb_image_host: string;
   tmdb_request_interval_ms: number;
   proxy_enabled: boolean;
   proxy_url: string;
@@ -88,6 +92,36 @@ export interface StrmScrapeItemListResult {
   limit: number;
   has_more: boolean;
   stats: StrmScrapeItemListStats;
+}
+
+export interface StrmScrapeScope {
+  strm_task_id: number;
+  excluded_dirs: string[];
+}
+
+export function fetchStrmScrapeScope(strmTaskId: number) {
+  return http.get<StrmScrapeScope>("/admin/strm-scrape/scope", { strm_task_id: strmTaskId });
+}
+
+export function saveStrmScrapeScope(strmTaskId: number, excludedDirs: string[]) {
+  return http.put<StrmScrapeScope>("/admin/strm-scrape/scope", {
+    strm_task_id: strmTaskId,
+    excluded_dirs: excludedDirs,
+  });
+}
+
+export async function fetchStrmScrapeScopeDirectories(strmTaskId: number, parent = "") {
+  const items = await http.get<Array<{ id: string; name: string; mod_time?: string }>>(
+    "/admin/strm-scrape/scope/directories",
+    { strm_task_id: strmTaskId, parent },
+  );
+  return items.map<FileItem>((item) => ({
+    id: item.id,
+    name: item.name,
+    size: 0,
+    is_dir: true,
+    mod_time: item.mod_time,
+  }));
 }
 
 export function fetchStrmScrapeSettings() {
@@ -138,7 +172,12 @@ export function rematchStrmScrapeItem(input: {
   return http.post<StrmScrapeRematchResult>("/admin/strm-scrape/rematch", input);
 }
 
-export function markStrmScrapeNormal(input: { strm_task_id: number; item_id: string }) {
+export function markStrmScrapeNormal(input: {
+  strm_task_id: number;
+  item_id: string;
+  media_type?: string;
+  clear_match?: boolean;
+}) {
   return http.post<StrmScrapeItem>("/admin/strm-scrape/mark-normal", input);
 }
 

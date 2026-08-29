@@ -10,7 +10,14 @@ import (
 // getQuarkTVStatus 返回夸克 TV 播放接管卡片状态。
 func (h *Handler) getQuarkTVStatus(w http.ResponseWriter, r *http.Request) {
 	if h.quarktv == nil {
-		writeOK(w, map[string]any{"enabled": false, "available": false})
+		writeOK(w, map[string]any{
+			"enabled":          false,
+			"available":        false,
+			"play_mode":        quarktv.PlayModeAdaptive,
+			"client_list_mode": quarktv.ClientListProxy,
+			"proxy_clients":    "vidhub",
+			"bindings":         []any{},
+		})
 		return
 	}
 	status, err := h.quarktv.Status(r.Context())
@@ -133,6 +140,9 @@ func (h *Handler) updateQuarkTVBindingSettings(w http.ResponseWriter, r *http.Re
 		AccountID           int64  `json:"account_id"`
 		PreferredResolution string `json:"preferred_resolution"`
 		AllowDolby          bool   `json:"allow_dolby"`
+		PlayMode            string `json:"play_mode"`
+		ClientListMode      string `json:"client_list_mode"`
+		ProxyClients        string `json:"proxy_clients"`
 	}
 	if err := decodeJSON(r, &in); err != nil {
 		writeErr(w, err)
@@ -145,13 +155,21 @@ func (h *Handler) updateQuarkTVBindingSettings(w http.ResponseWriter, r *http.Re
 	updated, err := h.quarktv.UpdateBindingSettings(r.Context(), in.AccountID, quarktv.BindingSettings{
 		PreferredResolution: in.PreferredResolution,
 		AllowDolby:          in.AllowDolby,
+		PlayMode:            in.PlayMode,
+		ClientListMode:      in.ClientListMode,
+		ProxyClients:        in.ProxyClients,
 	})
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	if h.playback != nil {
-		h.playback.InvalidateAccount(in.AccountID)
+		h.playback.InvalidateAll()
 	}
-	writeOK(w, updated)
+	writeOK(w, map[string]any{
+		"binding":          updated,
+		"play_mode":        h.quarktv.PlayMode(),
+		"client_list_mode": h.quarktv.ClientListMode(),
+		"proxy_clients":    h.quarktv.ProxyClients(),
+	})
 }

@@ -24,6 +24,7 @@ type Item struct {
 	HasNFO     bool   `json:"has_nfo"`
 	HasPoster  bool   `json:"has_poster"`
 	HasPending bool   `json:"has_pending"`
+	ManualDone bool   `json:"manual_done"`
 	TMDBID     string `json:"tmdb_id,omitempty"`
 	PosterURL  string `json:"poster_url,omitempty"`
 	FolderName string `json:"folder_name,omitempty"`
@@ -91,6 +92,8 @@ type Settings struct {
 
 	TmdbAPIKey            string `json:"tmdb_api_key"`
 	TmdbLanguage          string `json:"tmdb_language"`
+	TmdbAPIHost           string `json:"tmdb_api_host"`
+	TmdbImageHost         string `json:"tmdb_image_host"`
 	TmdbRequestIntervalMS int    `json:"tmdb_request_interval_ms"`
 	ProxyEnabled          bool   `json:"proxy_enabled"`
 	ProxyURL              string `json:"proxy_url"`
@@ -101,6 +104,17 @@ type Settings struct {
 type RunRequest struct {
 	StrmTaskID int64  `json:"strm_task_id"`
 	WriteMode  string `json:"write_mode,omitempty"`
+}
+
+type Scope struct {
+	StrmTaskID   int64    `json:"strm_task_id"`
+	ExcludedDirs []string `json:"excluded_dirs"`
+}
+
+type ScopeDirectory struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	ModTime string `json:"mod_time,omitempty"`
 }
 
 type RematchRequest struct {
@@ -115,6 +129,8 @@ type RematchRequest struct {
 type MarkNormalRequest struct {
 	StrmTaskID int64  `json:"strm_task_id"`
 	ItemID     string `json:"item_id"`
+	MediaType  string `json:"media_type,omitempty"`
+	ClearMatch bool   `json:"clear_match,omitempty"`
 }
 
 type RescrapeRequest struct {

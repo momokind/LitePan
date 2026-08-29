@@ -62,9 +62,11 @@ func (h *Handler) testFnosConfig(w http.ResponseWriter, r *http.Request) {
 func fnosSettingsTouched(changed map[string]string) bool {
 	for _, key := range []string{
 		settings.KeyFnosEnabled,
+		settings.KeyFnosName,
 		settings.KeyFnosURL,
 		settings.KeyFnosProxyPort,
 		settings.KeyFnosStrmPathMaps,
+		settings.KeyFnosDirectSTRMClients,
 	} {
 		if _, ok := changed[key]; ok {
 			return true

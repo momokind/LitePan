@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, watch
 import { useAuthStore } from "@/stores/auth";
 import { APP_NAME, APP_VERSION } from "@/version";
 import { useDeveloperUnlock } from "@/composables/useDeveloperUnlock";
+import { useAnnouncement } from "@/composables/useAnnouncement";
 import { toast } from "@/composables/useToast";
 import AppModal from "@/components/base/AppModal.vue";
 import AppInput from "@/components/base/AppInput.vue";
@@ -16,6 +17,7 @@ const emit = defineEmits<{ logout: [] }>();
 
 const auth = useAuthStore();
 const { unlocked: devUnlocked, init: devUnlockInit, unlock } = useDeveloperUnlock();
+const announcement = useAnnouncement();
 const open = ref(false);
 const wrapRef = ref<HTMLElement | null>(null);
 const menuPos = ref({ left: 0, bottom: 0 });
@@ -62,7 +64,16 @@ function handleLogout() {
   emit("logout");
 }
 
+// 点「关于」：关闭菜单并弹出公告（已读过也可再次查看，手动查看不改变已读状态）。
 function handleAboutClick() {
+  closeMenu();
+  void announcement.forceOpen().then((ok) => {
+    if (!ok) toast.info("暂无公告");
+  });
+}
+
+// 点「关于」前面的图标：1.8s 内连点 5 次触发开发者解锁（隐藏入口）。
+function handleAboutIconClick() {
   aboutClicks.value += 1;
   if (aboutClickTimer) clearTimeout(aboutClickTimer);
   aboutClickTimer = setTimeout(() => {
@@ -171,7 +182,14 @@ onBeforeUnmount(() => {
           @click="handleAboutClick"
           @keydown.enter="handleAboutClick"
         >
-          <span class="acct-menu__icon" aria-hidden="true">
+          <span
+            class="acct-menu__icon"
+            role="button"
+            tabindex="-1"
+            aria-label="关于 LitePan"
+            title="关于 LitePan"
+            @click.stop="handleAboutIconClick"
+          >
             <svg viewBox="0 0 24 24">
               <circle cx="12" cy="12" r="9" />
               <path d="M12 10v6" />
@@ -209,7 +227,6 @@ onBeforeUnmount(() => {
         @keydown.enter="confirmUnlock"
       />
       <div class="unlock-actions">
-        <AppButton variant="secondary" @click="unlockOpen = false">取消</AppButton>
         <AppButton variant="primary" @click="confirmUnlock">解锁</AppButton>
       </div>
     </div>
@@ -295,12 +312,12 @@ onBeforeUnmount(() => {
   bottom: calc(100% + 6px);
   width: auto;
   min-width: 0;
-  background: rgba(255, 255, 255, 0.9);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.65);
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
+  box-shadow: var(--shadow-pop);
   padding: 0;
   overflow: hidden;
   z-index: 130;
@@ -320,7 +337,7 @@ onBeforeUnmount(() => {
 }
 
 .acct-menu__section + .acct-menu__section {
-  border-top: 1px solid rgba(15, 23, 42, 0.06);
+  border-top: 1px solid var(--border-soft);
 }
 
 .acct-menu__item {
@@ -341,14 +358,14 @@ onBeforeUnmount(() => {
 }
 
 .acct-menu__avatar {
-  background: color-mix(in srgb, var(--brand) 12%, white);
+  background: color-mix(in srgb, var(--brand) 14%, var(--surface));
   color: var(--text);
   font-size: 14px;
   font-weight: 700;
 }
 
 .acct-menu__icon {
-  background: rgba(15, 23, 42, 0.05);
+  background: var(--surface-hover);
   color: var(--text-muted);
 }
 
@@ -421,7 +438,7 @@ onBeforeUnmount(() => {
 }
 
 .acct-menu__action:hover {
-  background: rgba(15, 23, 42, 0.04);
+  background: var(--surface-hover);
 }
 
 .acct-menu__action:hover .acct-menu__icon,
@@ -434,7 +451,7 @@ onBeforeUnmount(() => {
 }
 
 .acct-menu__about:hover {
-  background: rgba(15, 23, 42, 0.04);
+  background: var(--surface-hover);
 }
 
 .unlock-body {
